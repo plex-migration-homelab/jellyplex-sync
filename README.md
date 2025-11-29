@@ -2,6 +2,13 @@
 
 Can't decide between Jellyfin and Plex? This tool might help. It synchronizes your **movie library** between Jellyfin and Plex formats in **both directions** — without duplicating any files. Instead, it uses **hardlinks** to mirror your collection efficiently, saving storage while keeping both libraries in sync.
 
+## Fork Improvements
+
+This fork includes the following enhancements over the [original project](https://github.com/sniner/jellyplex-sync):
+
+- **Multi-edition movie support**: Improved handling of movies with multiple editions and their associated files
+- **Updated Docker workflow**: Replaced the original Docker build workflow with an updated GitHub Actions workflow that publishes to GitHub Container Registry
+
 > **Warning:** This script will **overwrite the entire target directory**. Do not store or edit anything manually in the target library path. The source library is treated as the **only source of truth**, and any unmatched content in the target folder may be deleted without warning.
 
 > **Note:** This tool is only useful if your media library is well-maintained and each movie resides in its own folder.
@@ -38,20 +45,20 @@ Originally, this script was designed for use in Unraid as a standalone file. Tha
 To use the published container image without installing anything locally:
 
 ```bash
-docker run --rm -it -v /your/media:/mnt ghcr.io/sniner/jellyplex-sync:latest /mnt/source /mnt/target
+docker run --rm -it -v /your/media:/mnt ghcr.io/plex-migration-homelab/jellyplex-sync:latest /mnt/source /mnt/target
 ```
 
 Example using the demo library included in the repo:
 
 ```bash
-docker run --rm -it -v .:/mnt ghcr.io/sniner/jellyplex-sync:latest /mnt/DEMO_PLEX_LIBRARY/Movies /mnt/DEMO_PLEX_LIBRARY/Jellyfin
+docker run --rm -it -v .:/mnt ghcr.io/plex-migration-homelab/jellyplex-sync:latest /mnt/DEMO_PLEX_LIBRARY/Movies /mnt/DEMO_PLEX_LIBRARY/Jellyfin
 ```
 
 > Note: Make sure to adjust the volume mount (`-v`) so that both source and target paths are accessible inside the container. They must also reside within the same bind mount, otherwise hard links between source and target will not work.
 
 ### Media server integration
 
-If you're using Unraid, you can add the included `jellyplex-sync.sh` script to the User Scripts plugin as a new custom script. This helper script pulls the latest container image (`ghcr.io/sniner/jellyplex-sync:latest`), removes any outdated images, and then runs the main sync operation.
+If you're using Unraid, you can add the included `jellyplex-sync.sh` script to the User Scripts plugin as a new custom script. This helper script pulls the latest container image (`ghcr.io/plex-migration-homelab/jellyplex-sync:latest`), removes any outdated images, and then runs the main sync operation.
 
 At the very bottom of the script, you'll find the actual command that runs the container. Make sure to adjust the source and target paths to match your own media library structure.
 
