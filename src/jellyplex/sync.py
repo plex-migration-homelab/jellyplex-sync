@@ -419,6 +419,38 @@ def determine_library_type(path: pathlib.Path) -> Optional[Type[MediaLibrary]]:
     return None
 
 
+def resolve_movie_folder(source_lib: MediaLibrary, partial_path: str) -> Optional[pathlib.Path]:
+    """
+    Resolve the partial sync path to a valid folder within the source library.
+
+    Handles cases where:
+    1. The path exists directly.
+    2. The path is mapped differently (e.g. Docker container) by matching the folder name.
+    """
+    p = pathlib.Path(partial_path)
+    candidates = []
+
+    # 1. Check direct path
+    if p.is_dir():
+        candidates.append(p)
+
+    # 2. Check by folder name in source library (handles remapping)
+    # Only add if it's different to avoid redundant checks
+    candidate_by_name = source_lib.base_dir / p.name
+    if candidate_by_name.is_dir() and candidate_by_name not in candidates:
+        candidates.append(candidate_by_name)
+
+    for candidate in candidates:
+        try:
+            # Verify the folder is actually within the source library
+            candidate.resolve().relative_to(source_lib.base_dir.resolve())
+            return candidate
+        except ValueError:
+            continue
+
+    return None
+
+
 def sync(
     source: str,
     target: str,
@@ -432,6 +464,21 @@ def sync(
     convert_to: Optional[str] = None,
     update_filenames: bool = False,
 ) -> int:
+    """
+    Synchronize source library to target library.
+
+    Args:
+        source: Path to source library
+        target: Path to target library
+        partial_path: Optional path to a single movie folder for partial sync.
+                      If provided, only this movie will be synced instead of the entire library.
+        dry_run: If True, do not make changes
+        delete: If True, remove stray files/folders
+        create: If True, create target directory if missing
+        verbose: Enable verbose logging
+        debug: Enable debug logging
+        convert_to: Library type to convert to ('Plex', 'Jellyfin', 'auto')
+    """
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
@@ -478,33 +525,11 @@ def sync(
 
     # Handle partial sync mode
     if partial_path:
-        movie_folder = pathlib.Path(partial_path)
+        movie_folder = resolve_movie_folder(source_lib, partial_path)
 
-        # Handle case where path uses container mapping vs host path
-        # Try to find the movie folder relative to source
-        if not movie_folder.is_dir():
-            # Maybe the path is relative or uses different mount point
-            # Try interpreting as relative to source
-            relative_attempt = source_lib.base_dir / movie_folder.name
-            if relative_attempt.is_dir():
-                movie_folder = relative_attempt
-            else:
-                log.error(f"Movie folder does not exist: {partial_path}")
-                return 1
-
-        # Verify path is within source library
-        try:
-            movie_folder.resolve().relative_to(source_lib.base_dir.resolve())
-        except ValueError:
-            # Path might be using different mount - try matching by folder name
-            folder_name = pathlib.Path(partial_path).name
-            potential_match = source_lib.base_dir / folder_name
-            if potential_match.is_dir():
-                movie_folder = potential_match
-                log.debug(f"Matched movie folder by name: {movie_folder}")
-            else:
-                log.error(f"Path {partial_path} is not within source library {source_lib.base_dir}")
-                return 1
+        if not movie_folder:
+            log.error(f"Movie folder does not exist or is not in source library: {partial_path}")
+            return 1
 
         # Parse movie metadata from folder
         movie = source_lib.parse_movie_path(movie_folder)

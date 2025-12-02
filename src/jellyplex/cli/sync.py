@@ -23,9 +23,11 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="Show debug messages")
     parser.add_argument("--update-filenames", action="store_true", help="Rename existing hardlinks if they have outdated names")
     parser.add_argument("--partial", type=str, metavar="PATH",
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--partial", type=str, metavar="PATH",
         help="Sync only the specified movie folder (partial sync)")
-    parser.add_argument("--radarr-hook", action="store_true",
-        help="Read movie path from Radarr environment variables (radarr_movie_path, radarr_eventtype, radarr_movie_title). For use as a Radarr custom script on Download/Upgrade/Rename events.")
+    group.add_argument("--radarr-hook", action="store_true",
+        help="Read movie path from Radarr environment variables")
     args = parser.parse_args()
 
     logging.basicConfig(
