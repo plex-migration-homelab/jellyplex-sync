@@ -179,6 +179,7 @@ def process_movie(
     *,
     dry_run: bool = False,
     delete: bool = False,
+    update_filenames: bool = False,
     verbose: bool = False,
 ) -> MovieStats:
     target_path = target.movie_path(movie)
@@ -198,10 +199,34 @@ def process_movie(
             video_path = target.video_path(movie, video or VideoInfo(extension=entry.suffix.lower()))
             video_name = video_path.name
             if video_name in videos_to_sync:
-                log.error("Conflicting video file '%s'. Aborting.", entry.name)
-                return MovieStats()
-            videos_to_sync[video_name] = (entry, video_path)
-            stats.videos_total += 1
+                if update_filenames:
+                    new_filename = entry.parent / video_name
+                    log.info("Renaming conflicting file: '%s' -> '%s'", entry.name, new_filename.name)
+                    if new_filename.exists():
+                        # The conflict is real (file exists), so we can't rename without overwriting
+                        log.error("Conflicting video file '%s' cannot be renamed because '%s' already exists. Aborting.", entry.name, new_filename.name)
+                        return MovieStats()
+
+                    if not dry_run:
+                        try:
+                            entry.rename(new_filename)
+                            # Update entry to point to new file
+                            entry = new_filename
+                        except OSError as e:
+                            log.error("Failed to rename file: %s", e)
+                            return MovieStats()
+
+                    # We continue, but we don't add to videos_to_sync because the slot is taken.
+                    # This avoids processing this file as a video source in the current run,
+                    # but since we renamed it to the target name, subsequent runs will pick it up correctly
+                    # (or it will clash if another file also maps to it).
+                    pass
+                else:
+                    log.error("Conflicting video file '%s'. Aborting.", entry.name)
+                    return MovieStats()
+            else:
+                videos_to_sync[video_name] = (entry, video_path)
+                stats.videos_total += 1
 
             # Find associated files
             base_stem = entry.stem
@@ -346,6 +371,7 @@ def sync(
     *,
     dry_run: bool = False,
     delete: bool = False,
+    update_filenames: bool = False,
     create: bool = False,
     verbose: bool = False,
     debug: bool = False,
@@ -407,6 +433,7 @@ def sync(
             src,
             movie,
             delete=delete,
+            update_filenames=update_filenames,
             verbose=verbose,
             dry_run=dry_run,
         )

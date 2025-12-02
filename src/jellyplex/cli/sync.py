@@ -17,6 +17,7 @@ def main() -> None:
         help="Type of library to convert to ('auto' will try to determine source library type)")
     parser.add_argument("--dry-run", action="store_true", help="Show actions only, don't execute them")
     parser.add_argument("--delete", action="store_true", help="Remove stray folders from target library")
+    parser.add_argument("--update-filenames", action="store_true", help="Rename conflicting files to match target filename")
     parser.add_argument("--create", action="store_true", help="Create missing target library")
     parser.add_argument("--verbose", action="store_true", help="Show more information messages")
     parser.add_argument("--debug", action="store_true", help="Show debug messages")
@@ -35,6 +36,7 @@ def main() -> None:
             args.target,
             dry_run= args.dry_run,
             delete=args.delete,
+            update_filenames=args.update_filenames,
             create=args.create,
             verbose=args.verbose,
             debug=args.debug,
