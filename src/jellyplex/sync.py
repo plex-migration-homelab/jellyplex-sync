@@ -37,6 +37,7 @@ def scan_media_library(
     dry_run: bool = False,
     delete: bool = False,
     stats: Optional[LibraryStats] = None,
+    include_dirs: Optional[List[pathlib.Path]] = None,
 ) -> Generator[Tuple[pathlib.Path, pathlib.Path, MovieInfo], None, None]:
     """Iterate over the source library and determine all movie folders.
     Yields a tuple for each movie folder:
@@ -51,6 +52,9 @@ def scan_media_library(
 
     # Inspect source libary for movie folders to sync
     for entry, movie in source.scan():
+        if include_dirs and entry not in include_dirs:
+            continue
+
         target_name = target.movie_name(movie)
         if target_name in movies_to_sync:
             if target_name not in conflicting_source_dirs:
@@ -78,18 +82,23 @@ def scan_media_library(
         yield item[0], target.base_dir / target_name, item[1]
 
     # Remove stray items in target library
-    for entry in target.base_dir.iterdir():
-        if entry.name not in movies_to_sync:
-            if delete:
-                if dry_run:
-                    log.info("DELETE %s", entry)
+    # Only perform global cleanup if we are not filtering
+    if not include_dirs:
+        for entry in target.base_dir.iterdir():
+            if entry.name not in movies_to_sync:
+                if delete:
+                    if dry_run:
+                        log.info("DELETE %s", entry)
+                    else:
+                        log.info("Removing stray item '%s' in target library", entry.name)
+                        utils.remove(entry)
+                    stats.items_removed += 1
                 else:
-                    log.info("Removing stray item '%s' in target library", entry.name)
-                    utils.remove(entry)
-                stats.items_removed += 1
-            else:
-                if not dry_run:
-                    log.info("Stray item '%s' found", entry.name)
+                    if not dry_run:
+                        log.info("Stray item '%s' found", entry.name)
+    elif delete:
+        # If filtering, we should probably warn that global delete is disabled
+        log.debug("Partial sync enabled: Global deletion of stray items in target library is disabled.")
 
 
 @dataclass
@@ -350,6 +359,7 @@ def sync(
     verbose: bool = False,
     debug: bool = False,
     convert_to: Optional[str] = None,
+    include_dirs: Optional[List[pathlib.Path]] = None,
 ) -> int:
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -400,7 +410,9 @@ def sync(
     stat_items_removed: int = 0
     lib_stats = LibraryStats()
 
-    for src, _, movie in scan_media_library(source_lib, target_lib, delete=delete, dry_run=dry_run, stats=lib_stats):
+    for src, _, movie in scan_media_library(
+        source_lib, target_lib, delete=delete, dry_run=dry_run, stats=lib_stats, include_dirs=include_dirs
+    ):
         s = process_movie(
             source_lib,
             target_lib,

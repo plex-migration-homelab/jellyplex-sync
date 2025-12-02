@@ -89,6 +89,9 @@ jellyplex-sync [OPTIONS] /path/to/jellyfin/library /path/to/plex/library
 - `--convert-to=...`
   Choose between `jellyfin`, `plex` or `auto` (which is the default): `jellyfin` assumes the source library is in Plex format and creates a Jellyfin-compatible mirror. `plex` does the opposite. And `auto` inspects the source library and selects the appropriate conversion automatically.
 
+- `--radarr`
+  Enable Radarr hook mode. This expects standard Radarr environment variables (like `radarr_eventtype` and `radarr_movie_path`) to be present. It restricts the sync operation to the specific movie folder reported by Radarr.
+
 ## Examples
 
 Mirror a Jellyfin library into an empty Plex structure:
