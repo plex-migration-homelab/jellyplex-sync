@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 import pathlib
 import sys
 
@@ -21,6 +22,10 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="Show more information messages")
     parser.add_argument("--debug", action="store_true", help="Show debug messages")
     parser.add_argument("--update-filenames", action="store_true", help="Rename existing hardlinks if they have outdated names")
+    parser.add_argument("--partial", type=str, metavar="PATH",
+        help="Sync only the specified movie folder (partial sync)")
+    parser.add_argument("--radarr-hook", action="store_true",
+        help="Read movie path from Radarr environment variables")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -31,10 +36,37 @@ def main() -> None:
 
     result = 0
     try:
+        partial_path = None
+
+        if args.radarr_hook:
+            event_type = os.environ.get("radarr_eventtype", "")
+            movie_title = os.environ.get("radarr_movie_title", "Unknown")
+
+            # Handle test events from Radarr
+            if event_type == "Test":
+                logging.info("Radarr test event received, exiting successfully")
+                sys.exit(0)
+
+            # Only process import-related events
+            if event_type not in ("Download", "Upgrade", "Rename"):
+                logging.info(f"Ignoring Radarr event type: {event_type}")
+                sys.exit(0)
+
+            partial_path = os.environ.get("radarr_movie_path")
+            if not partial_path:
+                logging.error("radarr_movie_path environment variable not set")
+                sys.exit(1)
+
+            logging.info(f"Radarr hook: {event_type} - {movie_title}")
+
+        elif args.partial:
+            partial_path = args.partial
+
         result = jp.sync(
             args.source,
             args.target,
-            dry_run= args.dry_run,
+            partial_path=partial_path,
+            dry_run=args.dry_run,
             delete=args.delete,
             create=args.create,
             verbose=args.verbose,

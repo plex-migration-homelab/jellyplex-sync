@@ -423,6 +423,7 @@ def sync(
     source: str,
     target: str,
     *,
+    partial_path: Optional[str] = None,
     dry_run: bool = False,
     delete: bool = False,
     create: bool = False,
@@ -474,6 +475,70 @@ def sync(
         else:
             log.error("Target directory '%s' does not exist", target_lib.base_dir)
             return 1
+
+    # Handle partial sync mode
+    if partial_path:
+        movie_folder = pathlib.Path(partial_path)
+
+        # Handle case where path uses container mapping vs host path
+        # Try to find the movie folder relative to source
+        if not movie_folder.is_dir():
+            # Maybe the path is relative or uses different mount point
+            # Try interpreting as relative to source
+            relative_attempt = source_lib.base_dir / movie_folder.name
+            if relative_attempt.is_dir():
+                movie_folder = relative_attempt
+            else:
+                log.error(f"Movie folder does not exist: {partial_path}")
+                return 1
+
+        # Verify path is within source library
+        try:
+            movie_folder.resolve().relative_to(source_lib.base_dir.resolve())
+        except ValueError:
+            # Path might be using different mount - try matching by folder name
+            folder_name = pathlib.Path(partial_path).name
+            potential_match = source_lib.base_dir / folder_name
+            if potential_match.is_dir():
+                movie_folder = potential_match
+                log.debug(f"Matched movie folder by name: {movie_folder}")
+            else:
+                log.error(f"Path {partial_path} is not within source library {source_lib.base_dir}")
+                return 1
+
+        # Parse movie metadata from folder
+        movie = source_lib.parse_movie_path(movie_folder)
+        if not movie:
+            log.error(f"Could not parse movie folder: {movie_folder.name}")
+            return 1
+
+        if verbose or dry_run:
+            log.info(f"Partial sync: '{movie_folder.name}'")
+
+        # Process just this one movie
+        # Note: delete=True here only affects files WITHIN this movie folder
+        # It will NOT delete other movies in the library
+        stats = process_movie(
+            source_lib,
+            target_lib,
+            movie_folder,
+            movie,
+            delete=delete,
+            verbose=verbose,
+            dry_run=dry_run,
+        )
+
+        items_linked = stats.videos_linked + stats.asset_items_linked
+        items_removed = stats.items_removed + stats.asset_items_removed
+
+        summary = (
+            f"Summary: 1 movie processed, "
+            f"{items_linked} files updated, "
+            f"{items_removed} files removed."
+        )
+        log.info(summary)
+
+        return 0
 
     stat_movies: int = 0
     stat_items_linked: int = 0
