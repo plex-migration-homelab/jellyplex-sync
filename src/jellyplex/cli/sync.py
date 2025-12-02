@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument("--partial", type=str, metavar="PATH",
         help="Sync only the specified movie folder (partial sync)")
     parser.add_argument("--radarr-hook", action="store_true",
-        help="Read movie path from Radarr environment variables")
+        help="Read movie path from Radarr environment variables (radarr_movie_path, radarr_eventtype, radarr_movie_title). For use as a Radarr custom script on Download/Upgrade/Rename events.")
     args = parser.parse_args()
 
     logging.basicConfig(
