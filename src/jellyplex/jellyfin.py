@@ -17,12 +17,12 @@ from .library import (
 log = logging.getLogger(__name__)
 
 
-JELLYFIN_ID_PATTERN = re.compile(r"\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]")
+JELLYFIN_ID_PATTERN = re.compile(r"(\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]|\{(?P<tmdb_id>tmdb-\d+)\})")
 JELLYFIN_MOVIE_PATTERNS = [
-    re.compile(r"^(?P<title>.+?)\s+\((?P<year>\d{4})\)\s* - \s*\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]"),
-    re.compile(r"^(?P<title>.+?)\s+\((?P<year>\d{4})\)\s+\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]"),
+    re.compile(r"^(?P<title>.+?)\s+\((?P<year>\d{4})\)\s* - \s*(?P<id_part>\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]|\{(?P<tmdb_id>tmdb-\d+)\})"),
+    re.compile(r"^(?P<title>.+?)\s+\((?P<year>\d{4})\)\s+(?P<id_part>\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]|\{(?P<tmdb_id>tmdb-\d+)\})"),
     re.compile(r"^(?P<title>.+?)\s+\((?P<year>\d{4})\)$"),
-    re.compile(r"^(?P<title>.+?)\s+\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]"),
+    re.compile(r"^(?P<title>.+?)\s+(?P<id_part>\[(?P<provider_id>[a-zA-Z]+id-[^\]]+)\]|\{(?P<tmdb_id>tmdb-\d+)\})"),
     re.compile(r"^(?P<title>.+?)$"),
 ]
 
@@ -152,10 +152,15 @@ class JellyfinLibrary(MediaLibrary):
                 title = match.group("title").strip()
                 year = match.group("year") if "year" in match.groupdict() else None
                 provider_id = match.group("provider_id") if "provider_id" in match.groupdict() else None
+                tmdb_id = match.group("tmdb_id") if "tmdb_id" in match.groupdict() else None
+
                 provider = movie_id = None
                 if provider_id:
                     provider, movie_id = provider_id.split("-", 1)
                     provider = provider.rstrip("id")
+                elif tmdb_id:
+                    provider, movie_id = tmdb_id.split("-", 1)
+
                 return MovieInfo(title=title, year=year, provider=provider, movie_id=movie_id)
         return None
 
@@ -164,7 +169,10 @@ class JellyfinLibrary(MediaLibrary):
         if movie.year:
             parts.append(f"({movie.year})")
         if movie.provider and movie.movie_id:
-            parts.append(f"[{movie.provider}id-{movie.movie_id}]")
+            if movie.provider == "tmdb":
+                parts.append(f"{{{movie.provider}-{movie.movie_id}}}")
+            else:
+                parts.append(f"[{movie.provider}id-{movie.movie_id}]")
         return " ".join(parts)
 
     def video_name(self, movie: MovieInfo, video: VideoInfo) -> str:
