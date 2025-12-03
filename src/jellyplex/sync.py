@@ -361,22 +361,21 @@ def resolve_movie_folder_path(
     movie_folder = pathlib.Path(partial_path)
     folder_by_name = source_base_dir / movie_folder.name
     
-    # Try direct path first
+    # First attempt: use the direct path if it exists
     if not movie_folder.is_dir():
-        # Maybe the path is relative or uses different mount point
-        # Try matching by folder name within source library
+        # Direct path doesn't exist - try matching by folder name (handles Docker path mapping)
         if folder_by_name.is_dir():
             movie_folder = folder_by_name
         else:
             log.error(f"Movie folder does not exist: {partial_path}")
             return None
     
-    # Verify path is within source library
+    # Second validation: verify the resolved path is within the source library
     try:
         # Check if path is within source library (raises ValueError if not)
         movie_folder.resolve().relative_to(source_base_dir.resolve())
     except ValueError:
-        # Path might be using different mount - try matching by folder name
+        # Path exists but is outside source library - try matching by folder name as fallback
         if folder_by_name.is_dir():
             movie_folder = folder_by_name
             log.debug(f"Matched movie folder by name: {movie_folder}")
