@@ -362,6 +362,8 @@ def sync(
         target: Path to the target media library directory
         partial_path: Optional path to a single movie folder for partial sync.
             If provided, only this movie will be synced instead of the entire library.
+            This should be a directory path containing the movie files (not a file path).
+            For example: "/path/to/library/Movie Title (2023)"
             The path can be:
             - An absolute path to the movie folder
             - A relative path (will be resolved relative to the source library)
