@@ -340,6 +340,55 @@ def determine_library_type(path: pathlib.Path) -> Optional[Type[MediaLibrary]]:
     return None
 
 
+def resolve_movie_folder_path(
+    partial_path: str,
+    source_base_dir: pathlib.Path,
+) -> Optional[pathlib.Path]:
+    """
+    Resolve a movie folder path, handling container mapping and mount point differences.
+    
+    This function attempts three different path resolution strategies:
+    1. Direct path resolution if the path exists as-is
+    2. Relative resolution using the folder name within the source base directory
+    3. Name-based matching if the path is outside the source directory
+    
+    Args:
+        partial_path: The path to resolve (may be absolute or use different mount points)
+        source_base_dir: The base directory of the source library
+        
+    Returns:
+        The resolved movie folder path, or None if resolution fails
+    """
+    movie_folder = pathlib.Path(partial_path)
+    
+    # Try direct path first
+    if not movie_folder.is_dir():
+        # Maybe the path is relative or uses different mount point
+        # Try interpreting as relative to source
+        relative_attempt = source_base_dir / movie_folder.name
+        if relative_attempt.is_dir():
+            movie_folder = relative_attempt
+        else:
+            log.error(f"Movie folder does not exist: {partial_path}")
+            return None
+    
+    # Verify path is within source library
+    try:
+        movie_folder.resolve().relative_to(source_base_dir.resolve())
+    except ValueError:
+        # Path might be using different mount - try matching by folder name
+        folder_name = pathlib.Path(partial_path).name
+        potential_match = source_base_dir / folder_name
+        if potential_match.is_dir():
+            movie_folder = potential_match
+            log.debug(f"Matched movie folder by name: {movie_folder}")
+        else:
+            log.error(f"Path {partial_path} is not within source library {source_base_dir}")
+            return None
+    
+    return movie_folder
+
+
 def sync(
     source: str,
     target: str,
@@ -398,33 +447,9 @@ def sync(
 
     # Handle partial sync mode
     if partial_path:
-        movie_folder = pathlib.Path(partial_path)
-
-        # Handle case where path uses container mapping vs host path
-        # Try to find the movie folder relative to source
-        if not movie_folder.is_dir():
-            # Maybe the path is relative or uses different mount point
-            # Try interpreting as relative to source
-            relative_attempt = source_lib.base_dir / movie_folder.name
-            if relative_attempt.is_dir():
-                movie_folder = relative_attempt
-            else:
-                log.error(f"Movie folder does not exist: {partial_path}")
-                return 1
-
-        # Verify path is within source library
-        try:
-            movie_folder.resolve().relative_to(source_lib.base_dir.resolve())
-        except ValueError:
-            # Path might be using different mount - try matching by folder name
-            folder_name = pathlib.Path(partial_path).name
-            potential_match = source_lib.base_dir / folder_name
-            if potential_match.is_dir():
-                movie_folder = potential_match
-                log.debug(f"Matched movie folder by name: {movie_folder}")
-            else:
-                log.error(f"Path {partial_path} is not within source library {source_lib.base_dir}")
-                return 1
+        movie_folder = resolve_movie_folder_path(partial_path, source_lib.base_dir)
+        if not movie_folder:
+            return 1
 
         # Parse movie metadata from folder
         movie = source_lib.parse_movie_path(movie_folder)
