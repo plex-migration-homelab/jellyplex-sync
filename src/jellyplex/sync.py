@@ -352,11 +352,11 @@ def resolve_movie_folder_path(
     2. Match by folder name within the source base directory (handles container path mapping)
     
     Args:
-        partial_path: The path to resolve (may be absolute or use different mount points)
-        source_base_dir: The base directory of the source library
+        partial_path (str): The path to resolve (may be absolute or use different mount points)
+        source_base_dir (pathlib.Path): The base directory of the source library
         
     Returns:
-        The resolved movie folder path, or None if resolution fails
+        Optional[pathlib.Path]: The resolved movie folder path, or None if resolution fails
     """
     movie_folder = pathlib.Path(partial_path)
     
@@ -373,6 +373,7 @@ def resolve_movie_folder_path(
     
     # Verify path is within source library
     try:
+        # Check if path is within source library (raises ValueError if not)
         movie_folder.resolve().relative_to(source_base_dir.resolve())
     except ValueError:
         # Path might be using different mount - try matching by folder name
