@@ -111,12 +111,17 @@ while IFS= read -r movie_path; do
 
     # Execute Docker Sync
     # We pass --partial "$movie_path" so the container only syncs that specific folder.
+    DOCKER_ARGS=(--user 99:100 -v "${MOUNT_SOURCE}:/mnt")
+    CONFIG_ARG=""
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        DOCKER_ARGS+=(-v "${CONFIG_FILE}:/etc/jellyplex/config.yaml:ro")
+        CONFIG_ARG="--config /etc/jellyplex/config.yaml"
+    fi
+
     docker run --rm \
-        --user 99:100 \
-        -v "${MOUNT_SOURCE}:/mnt" \
-        -v "${CONFIG_FILE}:/etc/jellyplex/config.yaml:ro" \
+        "${DOCKER_ARGS[@]}" \
         "$SYNC_IMAGE" \
-        --config /etc/jellyplex/config.yaml \
+        $CONFIG_ARG \
         --verbose \
         --delete \
         --create \

@@ -55,15 +55,19 @@ def resolve_movie_folder(
 
     # 2. Explicit path mappings
     if path_mappings:
-        for radarr_prefix, sync_prefix in path_mappings.items():
+        # Sort by length descending to handle overlapping prefixes correctly
+        for radarr_prefix, sync_prefix in sorted(path_mappings.items(), key=lambda x: len(x[0]), reverse=True):
             if partial_path.startswith(radarr_prefix):
                 mapped = partial_path.replace(radarr_prefix, sync_prefix, 1)
                 candidate = pathlib.Path(mapped)
                 if candidate.exists() and candidate.is_dir():
                     try:
-                        if source_lib.base_dir.resolve() in candidate.resolve().parents:
+                        resolved_candidate = candidate.resolve()
+                        resolved_base = source_lib.base_dir.resolve()
+                        if resolved_base in resolved_candidate.parents or resolved_base == resolved_candidate:
                             return candidate
-                    except Exception:
+                    except Exception as e:
+                        log.warning(f"Exception while checking candidate path '{candidate}': {e}")
                         pass
 
     # 3. Folder-name fallback

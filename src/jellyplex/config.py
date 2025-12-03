@@ -28,4 +28,10 @@ def load_config(config_path: Optional[str] = None) -> dict:
 def get_path_mappings(config_path: Optional[str] = None) -> Dict[str, str]:
     """Get path mappings from config file."""
     config = load_config(config_path)
-    return config.get("path_mappings", {})
+    mappings = config.get("path_mappings", {})
+    if mappings:
+        if not isinstance(mappings, dict):
+            log.warning(f"path_mappings should be a dictionary, got {type(mappings)}")
+            return {}
+        log.debug(f"Loaded {len(mappings)} path mapping(s)")
+    return mappings
