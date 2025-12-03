@@ -10,10 +10,12 @@
 # CONFIGURATION
 # ==============================================================================
 
-# Jellyfin Configuration (Pass these as Environment Variables or set here)
-# Defaults taken from legacy script
+# Jellyfin Configuration
+# REQUIRED: Set these as Environment Variables before running this script
+# JELLYFIN_URL: Your Jellyfin server URL (e.g., http://192.168.1.100:8096)
+# JELLYFIN_API_KEY: Your Jellyfin API key (REQUIRED - no default for security)
 JELLYFIN_URL="${JELLYFIN_URL:-http://192.168.3.51:8096}"
-JELLYFIN_API_KEY="${JELLYFIN_API_KEY:-05ab7145a0714683a03fe0ce106dd033}"
+JELLYFIN_API_KEY="${JELLYFIN_API_KEY}"
 
 # Docker Configuration
 SYNC_IMAGE="ghcr.io/plex-migration-homelab/jellyplex-sync:latest"
@@ -40,6 +42,14 @@ log() {
 
 # 1. Validation and Setup
 # -----------------------
+
+# Validate required configuration
+if [[ -z "${JELLYFIN_API_KEY}" ]]; then
+    log "ERROR: JELLYFIN_API_KEY environment variable is not set."
+    log "Please set this environment variable with your Jellyfin API key."
+    log "For security reasons, this value must not be hardcoded in the script."
+    exit 1
+fi
 
 # Handle Test Event
 if [[ "${radarr_eventtype}" == "Test" ]]; then

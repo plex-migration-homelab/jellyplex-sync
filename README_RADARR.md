@@ -48,18 +48,36 @@ This guide explains how to set up the synchronous `jellyplex-direct-hook.sh` scr
 
 ## Environment Variables
 
-The script includes default values, but you can override them by passing environment variables or editing the "Configuration" section at the top of the script.
+The script requires certain environment variables to be set. Some have defaults, but **JELLYFIN_API_KEY is required and must be set** for security reasons.
 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `JELLYFIN_URL` | Your Jellyfin Server URL | `http://192.168.3.51:8096` |
-| `JELLYFIN_API_KEY` | Jellyfin API Key | `05ab7145a0714683a03fe0ce106dd033` |
-| `LOG_FILE` | Path to log file (inside container) | `/config/logs/jellyplex-sync.log` |
-| `MOUNT_SOURCE` | Path to media library **on the host** | `/mnt/user/Media` |
+| Variable | Description | Default | Required |
+| :--- | :--- | :--- | :--- |
+| `JELLYFIN_URL` | Your Jellyfin Server URL | `http://192.168.3.51:8096` | No |
+| `JELLYFIN_API_KEY` | Jellyfin API Key | *None* | **YES** |
+| `LOG_FILE` | Path to log file (inside container) | `/config/logs/jellyplex-sync.log` | No |
+| `MOUNT_SOURCE` | Path to media library **on the host** | `/mnt/user/Media` | No |
 
-**Important**: `MOUNT_SOURCE` must be the absolute path on your Unraid host, not the path inside the Radarr container (e.g., `/Cumflix`). This is because the script instructs the Docker daemon (running on the host) to mount this path.
+### Setting Environment Variables
 
-To set these in Radarr without editing the script, you would typically need to set them in the Radarr container's environment variables (e.g., in your Docker Compose or Unraid template).
+**Security Note**: Never hardcode your API key in the script itself. Always set it as an environment variable.
+
+To set environment variables in Radarr:
+
+1.  **Docker Compose**: Add to your Radarr service:
+    ```yaml
+    environment:
+      - JELLYFIN_API_KEY=your_api_key_here
+    ```
+
+2.  **Unraid Docker Template**: Add a new variable in the template configuration:
+    *   Variable Name: `JELLYFIN_API_KEY`
+    *   Variable Value: Your actual API key
+
+3.  **Docker CLI**: Add `-e JELLYFIN_API_KEY=your_api_key_here` when creating the container.
+
+**Important Notes**:
+*   `MOUNT_SOURCE` must be the absolute path on your Unraid host, not the path inside the Radarr container (e.g., `/Cumflix`). This is because the script instructs the Docker daemon (running on the host) to mount this path.
+*   Your `JELLYFIN_API_KEY` should be treated as a secret and never committed to version control.
 
 ## Troubleshooting
 
