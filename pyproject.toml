@@ -5,7 +5,9 @@ description = "Convert your media library between Jellyfin and Plex formats by c
 readme = "README.md"
 authors = [{ name = "Stefan Schönberger", email = "mail@sniner.dev" }]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0",
+]
 
 [tool.poetry]
 packages = [{ include = "jellyplex", from = "src" }]

@@ -7,6 +7,7 @@ import pathlib
 import sys
 
 import jellyplex as jp
+from jellyplex.config import get_path_mappings
 
 
 def main() -> None:
@@ -22,6 +23,7 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true", help="Show more information messages")
     parser.add_argument("--debug", action="store_true", help="Show debug messages")
     parser.add_argument("--update-filenames", action="store_true", help="Rename existing hardlinks if they have outdated names")
+    parser.add_argument("--config", help="Path to configuration file")
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--partial", help="Sync only the specified movie folder path")
@@ -60,6 +62,8 @@ def main() -> None:
         logging.info(f"Radarr hook triggered for movie: {movie_title}")
         partial_path = radarr_path
 
+    path_mappings = get_path_mappings(args.config)
+
     result = 0
     try:
         result = jp.sync(
@@ -73,6 +77,7 @@ def main() -> None:
             convert_to=args.convert_to,
             update_filenames=args.update_filenames,
             partial_path=partial_path,
+            path_mappings=path_mappings,
         )
     except KeyboardInterrupt:
         logging.info("INTERRUPTED")

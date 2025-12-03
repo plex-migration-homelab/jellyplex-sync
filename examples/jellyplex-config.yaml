@@ -1,0 +1,6 @@
+# Path mappings: Radarr container path -> Sync container path
+# This allows the sync tool to translate paths when Radarr runs in a container
+# with different volume mappings than the sync tool.
+path_mappings:
+  /Cumflix/movies: /mnt/movies
+  /Cumflix/movies-4k: /mnt/movies-4k
