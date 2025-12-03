@@ -21,10 +21,14 @@ def main() -> None:
     parser.add_argument("--create", action="store_true", help="Create missing target library")
     parser.add_argument("--verbose", action="store_true", help="Show more information messages")
     parser.add_argument("--debug", action="store_true", help="Show debug messages")
-    parser.add_argument("--partial", type=str, metavar="PATH",
+    
+    # Create mutually exclusive group for partial sync options
+    partial_group = parser.add_mutually_exclusive_group()
+    partial_group.add_argument("--partial", type=str, metavar="PATH",
         help="Sync only the specified movie folder (partial sync)")
-    parser.add_argument("--radarr-hook", action="store_true",
+    partial_group.add_argument("--radarr-hook", action="store_true",
         help="Read movie path from Radarr environment variables")
+    
     args = parser.parse_args()
 
     logging.basicConfig(
