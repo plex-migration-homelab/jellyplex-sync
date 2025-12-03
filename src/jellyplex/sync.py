@@ -347,10 +347,9 @@ def resolve_movie_folder_path(
     """
     Resolve a movie folder path, handling container mapping and mount point differences.
     
-    This function attempts three different path resolution strategies:
-    1. Direct path resolution if the path exists as-is
-    2. Relative resolution using the folder name within the source base directory
-    3. Name-based matching if the path is outside the source directory
+    This function attempts to resolve the path using two strategies:
+    1. Use the direct path if it exists and is within the source library
+    2. Match by folder name within the source base directory (handles container path mapping)
     
     Args:
         partial_path: The path to resolve (may be absolute or use different mount points)
