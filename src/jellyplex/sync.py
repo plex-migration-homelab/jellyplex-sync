@@ -359,14 +359,14 @@ def resolve_movie_folder_path(
         Optional[pathlib.Path]: The resolved movie folder path, or None if resolution fails
     """
     movie_folder = pathlib.Path(partial_path)
+    folder_by_name = source_base_dir / movie_folder.name
     
     # Try direct path first
     if not movie_folder.is_dir():
         # Maybe the path is relative or uses different mount point
-        # Try interpreting as relative to source
-        relative_attempt = source_base_dir / movie_folder.name
-        if relative_attempt.is_dir():
-            movie_folder = relative_attempt
+        # Try matching by folder name within source library
+        if folder_by_name.is_dir():
+            movie_folder = folder_by_name
         else:
             log.error(f"Movie folder does not exist: {partial_path}")
             return None
@@ -377,9 +377,8 @@ def resolve_movie_folder_path(
         movie_folder.resolve().relative_to(source_base_dir.resolve())
     except ValueError:
         # Path might be using different mount - try matching by folder name
-        potential_match = source_base_dir / movie_folder.name
-        if potential_match.is_dir():
-            movie_folder = potential_match
+        if folder_by_name.is_dir():
+            movie_folder = folder_by_name
             log.debug(f"Matched movie folder by name: {movie_folder}")
         else:
             log.error(f"Path {partial_path} is not within source library {source_base_dir}")
