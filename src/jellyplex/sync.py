@@ -352,6 +352,32 @@ def sync(
     debug: bool = False,
     convert_to: Optional[str] = None,
 ) -> int:
+    """Sync a media library from source to target format.
+    
+    Converts media libraries between Jellyfin and Plex formats by creating
+    hard-linked mirrors. Can process an entire library or a single movie folder.
+    
+    Args:
+        source: Path to the source media library directory
+        target: Path to the target media library directory
+        partial_path: Optional path to a single movie folder for partial sync.
+            If provided, only this movie will be synced instead of the entire library.
+            The path can be:
+            - An absolute path to the movie folder
+            - A relative path (will be resolved relative to the source library)
+            - A path using different mount points (will attempt to match by folder name)
+            When using partial sync, the delete parameter only affects files within
+            the specified movie folder, not the entire library.
+        dry_run: Show actions without executing them
+        delete: Remove stray folders from target library
+        create: Create the target library directory if it doesn't exist
+        verbose: Show additional information messages
+        debug: Show debug-level messages
+        convert_to: Target library type ('plex', 'jellyfin', or 'auto' to auto-detect)
+    
+    Returns:
+        Exit code (0 for success, non-zero for errors)
+    """
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
