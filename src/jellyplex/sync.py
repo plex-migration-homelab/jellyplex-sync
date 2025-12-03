@@ -377,8 +377,7 @@ def resolve_movie_folder_path(
         movie_folder.resolve().relative_to(source_base_dir.resolve())
     except ValueError:
         # Path might be using different mount - try matching by folder name
-        folder_name = pathlib.Path(partial_path).name
-        potential_match = source_base_dir / folder_name
+        potential_match = source_base_dir / movie_folder.name
         if potential_match.is_dir():
             movie_folder = potential_match
             log.debug(f"Matched movie folder by name: {movie_folder}")
