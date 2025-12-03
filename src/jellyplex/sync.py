@@ -31,12 +31,17 @@ class LibraryStats:
     items_removed: int = 0
 
 
-def resolve_movie_folder(source_lib: MediaLibrary, partial_path: str) -> Optional[pathlib.Path]:
+def resolve_movie_folder(
+    source_lib: MediaLibrary,
+    partial_path: str,
+    path_mappings: Optional[Dict[str, str]] = None
+) -> Optional[pathlib.Path]:
     """Resolves a partial path to a valid folder in the source library."""
     if not partial_path:
         return None
     path = pathlib.Path(partial_path)
 
+    # 1. Direct path
     # If path exists and is absolute or relative to cwd
     if path.exists() and path.is_dir():
         # Check if it is inside source_lib
@@ -48,6 +53,24 @@ def resolve_movie_folder(source_lib: MediaLibrary, partial_path: str) -> Optiona
         except Exception:
             pass
 
+    # 2. Explicit path mappings
+    if path_mappings:
+        # Sort by length descending to handle overlapping prefixes correctly
+        for radarr_prefix, sync_prefix in sorted(path_mappings.items(), key=lambda x: len(x[0]), reverse=True):
+            if partial_path.startswith(radarr_prefix):
+                mapped = partial_path.replace(radarr_prefix, sync_prefix, 1)
+                candidate = pathlib.Path(mapped)
+                if candidate.exists() and candidate.is_dir():
+                    try:
+                        resolved_candidate = candidate.resolve()
+                        resolved_base = source_lib.base_dir.resolve()
+                        if resolved_base in resolved_candidate.parents or resolved_base == resolved_candidate:
+                            return candidate
+                    except Exception as e:
+                        log.warning(f"Exception while checking candidate path '{candidate}': {e}")
+                        pass
+
+    # 3. Folder-name fallback
     # Try matching by folder name
     # This handles Docker path remapping
     folder_name = path.name
@@ -464,6 +487,7 @@ def sync(
     convert_to: Optional[str] = None,
     update_filenames: bool = False,
     partial_path: Optional[str] = None,
+    path_mappings: Optional[Dict[str, str]] = None,
 ) -> int:
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -516,7 +540,7 @@ def sync(
 
     if partial_path:
         # Partial sync logic
-        movie_folder = resolve_movie_folder(source_lib, partial_path)
+        movie_folder = resolve_movie_folder(source_lib, partial_path, path_mappings=path_mappings)
         if not movie_folder:
             log.error(f"Could not resolve movie folder for partial path: {partial_path}")
             return 1

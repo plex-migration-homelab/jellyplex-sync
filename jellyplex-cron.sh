@@ -18,6 +18,10 @@
 QUEUE_FILE="${QUEUE_FILE:-/mnt/user/Media/.jellyplex-queue}"
 LOCK_FILE="/tmp/jellyplex-cron.lock"
 LOG_FILE="${LOG_FILE:-/mnt/user/appdata/radarr/logs/jellyplex-sync.log}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Configuration
+CONFIG_FILE="${CONFIG_FILE:-${SCRIPT_DIR}/jellyplex-config.yaml}"
 
 # Docker Configuration
 SYNC_IMAGE="ghcr.io/plex-migration-homelab/jellyplex-sync:latest"
@@ -107,10 +111,17 @@ while IFS= read -r movie_path; do
 
     # Execute Docker Sync
     # We pass --partial "$movie_path" so the container only syncs that specific folder.
+    DOCKER_ARGS=(--user 99:100 -v "${MOUNT_SOURCE}:/mnt")
+    CONFIG_ARG=""
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        DOCKER_ARGS+=(-v "${CONFIG_FILE}:/etc/jellyplex/config.yaml:ro")
+        CONFIG_ARG="--config /etc/jellyplex/config.yaml"
+    fi
+
     docker run --rm \
-        --user 99:100 \
-        -v "${MOUNT_SOURCE}:/mnt" \
+        "${DOCKER_ARGS[@]}" \
         "$SYNC_IMAGE" \
+        $CONFIG_ARG \
         --verbose \
         --delete \
         --create \

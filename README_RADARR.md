@@ -49,6 +49,26 @@ By default, the script writes to `/Cumflix/.jellyplex-queue`. If your Radarr use
 | `MOUNT_SOURCE` | Cron | Host media path to mount in Docker | `/mnt/user/Media` |
 | `JELLYFIN_URL` | Cron | Jellyfin URL | `http://localhost:8096` (Use HTTPS in production) |
 | `JELLYFIN_API_KEY` | Cron | API Key for notifications | **(Set via Environment Variable)** |
+| `CONFIG_FILE` | Cron | Path to config file (Host path) | `${SCRIPT_DIR}/jellyplex-config.yaml` |
+
+## Configuration File
+
+You can create a `jellyplex-config.yaml` file to define path mappings between Radarr and the sync container. This is useful when Radarr uses different volume mappings than the sync tool (e.g., `/Cumflix` vs `/mnt`).
+
+### Location
+
+The cron script looks for `jellyplex-config.yaml` in the same directory as the script by default. You can override this by setting the `CONFIG_FILE` environment variable.
+
+### Format
+
+```yaml
+# Path mappings: Radarr container path -> Sync container path
+path_mappings:
+  /Cumflix/movies: /mnt/movies
+  /Cumflix/movies-4k: /mnt/movies-4k
+```
+
+When path mappings are provided, the sync tool will attempt to rewrite the partial path received from Radarr before falling back to folder-name matching.
 
 ## Troubleshooting
 
