@@ -39,6 +39,10 @@ def main() -> None:
     if args.radarr_hook:
         import os
         event_type = os.environ.get("radarr_eventtype")
+        if not event_type:
+            logging.error("radarr_eventtype environment variable not set")
+            sys.exit(1)
+
         if event_type == "Test":
             logging.info("Radarr connection test successful")
             sys.exit(0)
