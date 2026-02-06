@@ -394,66 +394,123 @@ class VerifyStats:
     links_repaired: int = 0
 
 
+def _find_source_disk(source_merged_path: pathlib.Path) -> pathlib.Path | None:
+    """Find which physical disk (/mnt/disk* or /mnt/downloads) contains the source file.
+    
+    Returns the path to the actual file on the physical disk.
+    """
+    # Check each physical disk
+    for disk_num in range(1, 20):  # disk1 through disk19
+        disk_path = pathlib.Path(f"/mnt/disk{disk_num}")
+        if not disk_path.exists():
+            continue
+            
+        # The source merged path is like: /mnt/storage/Media/movies/Movie/file.mkv
+        # Check if this file exists on this disk at: /mnt/disk1/Media/movies/Movie/file.mkv
+        try:
+            # Extract the path after /Media/ from the merged path
+            merged_str = str(source_merged_path)
+            if '/Media/' in merged_str:
+                rel_from_media = merged_str.split('/Media/', 1)[1]
+                test_path = disk_path / 'Media' / rel_from_media
+                if test_path.exists():
+                    return test_path
+        except (ValueError, IndexError):
+            continue
+    
+    # Also check /mnt/downloads
+    downloads_path = pathlib.Path("/mnt/downloads")
+    if downloads_path.exists():
+        try:
+            merged_str = str(source_merged_path)
+            if '/Media/' in merged_str:
+                rel_from_media = merged_str.split('/Media/', 1)[1]
+                test_path = downloads_path / 'Media' / rel_from_media
+                if test_path.exists():
+                    return test_path
+        except (ValueError, IndexError):
+            pass
+    
+    return None
+
+
+def _compute_target_on_same_disk(source_phys: pathlib.Path, target_merged: pathlib.Path, source_merged: pathlib.Path) -> pathlib.Path:
+    """Compute target physical path on same disk as source.
+    
+    source_phys: /mnt/disk1/Media/movies/Movie/file.mkv
+    source_merged: /mnt/storage/Media/movies/Movie/file.mkv  
+    target_merged: /mnt/storage/Media/jellyfin/movies/Movie/file.mkv
+    
+    Returns: /mnt/disk1/Media/jellyfin/movies/Movie/file.mkv
+    """
+    # Find the disk base (e.g., /mnt/disk1)
+    disk_base = None
+    for part in source_phys.parts:
+        if part.startswith('disk') or part == 'downloads':
+            disk_base = pathlib.Path('/mnt') / part
+            break
+    
+    if not disk_base:
+        raise ValueError(f"Could not determine disk base from {source_phys}")
+    
+    # Get relative path from source_merged
+    # source_merged: /mnt/storage/Media/movies/Movie/file.mkv
+    # We need the part after the library root to find the common structure
+    
+    # Find where the paths diverge
+    source_parts = source_merged.parts
+    target_parts = target_merged.parts
+    
+    # Find common prefix length
+    common_len = 0
+    for s, t in zip(source_parts, target_parts):
+        if s == t:
+            common_len += 1
+        else:
+            break
+    
+    # Get the diverging parts
+    source_suffix = list(source_parts[common_len:])  # ['movies', 'Movie', 'file.mkv']
+    target_suffix = list(target_parts[common_len:])  # ['jellyfin', 'movies', 'Movie', 'file.mkv']
+    
+    # The source physical path on disk includes the full path from Media/
+    # We need to replace the source-specific part with target-specific part
+    source_phys_str = str(source_phys)
+    
+    # Build target by replacing the diverging parts
+    # Remove source suffix from physical path and add target suffix
+    result_parts = list(source_phys.parts)
+    
+    # Remove the diverging source parts from the end
+    for _ in source_suffix:
+        if result_parts:
+            result_parts.pop()
+    
+    # Add the target parts
+    result_parts.extend(target_suffix)
+    
+    return pathlib.Path(*result_parts)
+
+
 def _resolve_physical_target(source: pathlib.Path, target: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path] | tuple[None, None]:
     """Resolve physical paths for MergerFS hardlinking.
-
-    Uses xattrs to determine the physical branch where source resides,
-    then computes the corresponding physical target path on that same branch.
-
-    Args:
-        source: Source file path (on MergerFS merged mount)
-        target: Target file path (on MergerFS merged mount)
-
-    Returns:
-        Tuple of (physical_source, physical_target) or (None, None) if resolution fails
+    
+    Finds the actual physical disk where the source file lives,
+    then computes the corresponding target path on that same disk.
     """
-    # Get physical source path via xattr
-    src_phys_str = get_mergerfs_fullpath(source)
-    if not src_phys_str:
-        log.debug("Cannot resolve physical path for source: %s", source)
-        return None, None
-
-    # Get source branch root
-    src_branch, src_relpath = get_mergerfs_info(source)
-    if not src_branch:
-        log.debug("Cannot determine MergerFS branch for source: %s", source)
-        return None, None
-
     try:
-        # Simple approach:
-        # 1. The xattrs tell us the source relpath from the mergerfs root
-        # 2. We can determine the mergerfs mount point by removing relpath from source
-        # 3. Apply the same logic to target
-        
-        # Example:
-        #   Source: /mnt/storage/Media/movies/Movie/file.mkv
-        #   Src relpath: Media/movies/Movie/file.mkv
-        #   Mount point: /mnt/storage (source minus relpath)
-        #   
-        #   Target: /mnt/storage/Media/jellyfin/movies/Movie/file.mkv
-        #   Target relpath from mount: Media/jellyfin/movies/Movie/file.mkv
-        #   Physical target: /mnt/storage-base/Media/jellyfin/movies/Movie/file.mkv
-        
-        source_str = str(source)
-        if not src_relpath or not source_str.endswith(src_relpath):
-            log.debug("Source path doesn't end with relpath: %s, %s", source, src_relpath)
-            return None, None
-            
-        # Determine mount point by stripping the relpath from source
-        mount_point = pathlib.Path(source_str[:-len(src_relpath)].rstrip('/'))
-        
-        # Get target's relative path from the mount point
-        try:
-            target_rel = target.relative_to(mount_point)
-        except ValueError:
-            log.debug("Target not under mount point %s: %s", mount_point, target)
+        # Find the real physical disk containing the source file
+        source_phys = _find_source_disk(source)
+        if not source_phys:
+            log.debug("Could not find source file on any physical disk: %s", source)
             return None, None
         
-        # Construct physical target: branch + target_relative
-        phys_target = pathlib.Path(src_branch) / target_rel
+        # Compute target path on the same disk
+        target_phys = _compute_target_on_same_disk(source_phys, target, source)
         
-        return pathlib.Path(src_phys_str), phys_target
-
+        log.debug("Resolved: %s -> %s on disk", source_phys, target_phys)
+        return source_phys, target_phys
+        
     except Exception as e:
         log.debug("Failed to resolve physical target: %s", e)
         return None, None
