@@ -420,41 +420,60 @@ def _resolve_physical_target(source: pathlib.Path, target: pathlib.Path) -> tupl
         return None, None
 
     try:
-        # Compute physical target path on the same branch as source
-        # target is like: /mnt/jellyfin/movies-4k/Movie/file.mkv
-        # We need: /mnt/diskX/Media/jellyfin/movies-4k/Movie/file.mkv
-
-        # Get the relative path from the merged root
-        # We need to determine what the merged root is by looking at target's structure
-        # target.anchor gives us the root (e.g., /)
-        # We need to reconstruct based on the target's path components
-
-        target_parts = target.parts
-        if len(target_parts) < 2:
-            log.debug("Target path too short: %s", target)
+        # Simple approach:
+        # 1. The xattrs tell us the source relpath from the mergerfs root
+        # 2. We can determine the mergerfs mount point by removing relpath from source
+        # 3. Apply the same logic to target
+        
+        # Example:
+        #   Source: /mnt/storage/Media/movies/Movie/file.mkv
+        #   Src relpath: Media/movies/Movie/file.mkv
+        #   Mount point: /mnt/storage (source minus relpath)
+        #   
+        #   Target: /mnt/storage/Media/jellyfin/movies/Movie/file.mkv
+        #   Target relpath from mount: Media/jellyfin/movies/Movie/file.mkv
+        #   Physical target: /mnt/storage-base/Media/jellyfin/movies/Movie/file.mkv
+        
+        source_str = str(source)
+        if not src_relpath or not source_str.endswith(src_relpath):
+            log.debug("Source path doesn't end with relpath: %s, %s", source, src_relpath)
             return None, None
-
-        # Build physical target: branch + relative path after /mnt or similar
-        # Assuming target is like /mnt/jellyfin/movies-4k/...
-        # We want: /mnt/diskX/Media/jellyfin/movies-4k/...
-        # The key is to preserve the path structure after the mount point
-
-        # Find where the actual path starts (after mount point)
-        # For /mnt/jellyfin/movies-4k/Movie/file.mkv
-        # We want to extract: jellyfin/movies-4k/Movie/file.mkv
-        mount_point = pathlib.Path(target.anchor) / target_parts[1] if len(target_parts) > 1 else target
-
-        # Get relative path from mount point
+            
+        # Determine mount point by stripping the relpath from source
+        mount_point = pathlib.Path(source_str[:-len(src_relpath)].rstrip('/'))
+        
+        # Get target's relative path from the mount point
         try:
-            rel_from_mount = target.relative_to(mount_point)
+            target_rel = target.relative_to(mount_point)
         except ValueError:
-            # If target is not under mount_point, use full relative path from root
-            rel_from_mount = target.relative_to(target.anchor)
-
-        # Construct physical target on the source branch
-        # Prepend "Media" if the branch structure includes it
-        phys_target = pathlib.Path(src_branch) / rel_from_mount
-
+            log.debug("Target not under mount point %s: %s", mount_point, target)
+            return None, None
+        
+        # Construct physical target: branch + target_relative
+        phys_target = pathlib.Path(src_branch) / target_rel
+        
+        return pathlib.Path(src_phys_str), phys_target
+            # If source is /mnt/storage/Media/movies/Movie/file.mkv
+            # and src_relpath is Media/movies/Movie/file.mkv
+            # then the mount point is /mnt/storage
+            
+            # Find the mount point by removing src_relpath from source
+            source_str = str(source)
+            if src_relpath and source_str.endswith(src_relpath):
+                mount_point = pathlib.Path(source_str[:-len(src_relpath)])
+                
+                # Now compute target relative to mount point
+                try:
+                    target_rel = target.relative_to(mount_point)
+                    phys_target = pathlib.Path(src_branch) / target_rel
+                except ValueError:
+                    log.debug("Target not under mount point %s: %s", mount_point, target)
+                    return None, None
+            else:
+                log.debug("Cannot determine mount point from source: %s, relpath: %s", 
+                         source, src_relpath)
+                return None, None
+        
         return pathlib.Path(src_phys_str), phys_target
 
     except Exception as e:
