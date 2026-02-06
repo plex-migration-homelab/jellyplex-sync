@@ -413,22 +413,57 @@ def safe_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
         return True
     except OSError as e:
         if e.errno == errno.EXDEV:
-            # Cross-device link - provide MergerFS-specific help if applicable
-            src_branch, _ = get_mergerfs_info(source)
-            if src_branch:
+            # Cross-device link - attempt physical path fallback for MergerFS
+            log.debug("EXDEV on merged path '%s' -> '%s', attempting physical branch fallback", source, target)
+
+            # Get physical source path via xattr
+            src_phys_str = get_mergerfs_fullpath(source)
+            if not src_phys_str:
                 log.error(
                     "Cannot hardlink '%s' -> '%s': Cross-device link (EXDEV). "
-                    "Source is on MergerFS branch '%s'. "
-                    "The target directory may have been created on a different branch. "
-                    "Ensure target directories are pre-created on the same branch as source files.",
-                    source, target, src_branch
-                )
-            else:
-                log.error(
-                    "Cannot hardlink '%s' -> '%s': Cross-device link. "
-                    "Source and target must be on the same filesystem.",
+                    "Source is on MergerFS but cannot determine physical path. "
+                    "Ensure container has access to physical branches.",
                     source, target
                 )
+                return False
+
+            # Get source branch root
+            src_branch, src_relpath = get_mergerfs_info(source)
+            if not src_branch:
+                log.error("Cannot determine MergerFS branch for source: %s", source)
+                return False
+
+            try:
+                # Compute physical target path by replacing merged root with branch root
+                # target is like: /mnt/jellyfin/movies-4k/Movie/file.mkv
+                # We need: /mnt/storage-base/jellyfin/movies-4k/Movie/file.mkv
+                target_relative = target.relative_to(target.anchor)  # jellyfin/movies-4k/...
+                phys_target = pathlib.Path(src_branch) / target_relative
+                phys_target_parent = phys_target.parent
+
+                # Create directory structure on physical branch
+                phys_target_parent.mkdir(parents=True, exist_ok=True)
+
+                # Create hardlink using physical paths
+                phys_source = pathlib.Path(src_phys_str)
+                phys_target.hardlink_to(phys_source)
+
+                log.info(
+                    "Created physical hardlink: %s -> %s (branch: %s)",
+                    src_phys_str, phys_target, src_branch
+                )
+                return True
+
+            except Exception as phys_err:
+                log.error(
+                    "Cannot hardlink '%s' -> '%s': Cross-device link (EXDEV). "
+                    "Physical fallback failed: %s. "
+                    "Source branch: '%s'. "
+                    "Ensure target directories are pre-created on the same branch as source files.",
+                    source, target, phys_err, src_branch
+                )
+                return False
+
         elif e.errno == errno.EACCES:
             log.error(
                 "Permission denied creating hardlink '%s' -> '%s'. "
