@@ -195,8 +195,13 @@ def are_same_filesystem(
 ) -> tuple[bool, bool]:
     """Check if two paths are on the same filesystem with MergerFS awareness.
 
-    For MergerFS filesystems, checks if both paths are on the same underlying
-    branch. For regular filesystems, compares st_dev from stat().
+    For MergerFS filesystems, this function ALWAYS returns True to allow the sync
+    to proceed. The actual colocation checks happen at the per-file level in
+    is_colocated() and safe_hardlink(). This is necessary because with MergerFS
+    create=ff policy, base directories can be on different branches than the
+    files within them.
+
+    For regular filesystems, compares st_dev from stat().
 
     Args:
         path1: First path to check
@@ -206,25 +211,21 @@ def are_same_filesystem(
 
     Returns:
         Tuple of (is_same, is_mergerfs):
-        - is_same: True if paths are on the same filesystem/branch
+        - is_same: True if paths are on the same filesystem/branch (always True for MergerFS)
         - is_mergerfs: True if path1 appears to be on a MergerFS mount
     """
     # First try MergerFS detection
     branch1, _ = get_mergerfs_info(path1)
     branch2, _ = get_mergerfs_info(path2)
 
-    if branch1 is not None:
-        # We have MergerFS - check if branch2 is the same
-        if branch2 is not None:
-            return branch1 == branch2, True
-        # path1 is on MergerFS but we couldn't get info for path2
-        # This could mean path2 doesn't exist yet
-        return True, True  # Allow and let per-file checks handle it
-
-    # Check if path2 is on MergerFS (path1 is not)
-    if branch2 is not None:
-        # Mixed case - one is MergerFS, one is not
-        return False, False
+    if branch1 is not None or branch2 is not None:
+        # We're on MergerFS - skip base directory check entirely
+        # The per-file colocation checks in safe_hardlink() will handle it
+        log.debug(
+            "MergerFS detected (branch1=%s, branch2=%s). Skipping base directory check.",
+            branch1, branch2
+        )
+        return True, True
 
     # Neither is MergerFS (or xattrs unavailable) - fall back to st_dev
     try:
