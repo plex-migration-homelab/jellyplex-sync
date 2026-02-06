@@ -1,0 +1,5 @@
+# Jellyplex Sync Dependencies
+# Install with: pip install -r requirements.txt
+
+# Extended attribute support for MergerFS physical path resolution
+xattr>=0.10.0

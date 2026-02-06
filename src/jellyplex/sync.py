@@ -325,15 +325,25 @@ def _check_library_colocation(
 
 
 def verify_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
-    """Verify that target is a valid hard link to source by comparing inodes.
+    """Verify that target is a valid hard link to source by comparing physical inodes.
 
-    Returns True if both files share the same inode (valid hard link),
+    For MergerFS filesystems, resolves physical paths on underlying branches
+    before comparing (st_dev, st_ino) tuples. This prevents false negatives
+    caused by inode virtualization on the merged mount.
+
+    Returns True if both files share the same physical inode (valid hard link),
     False otherwise.
     """
     try:
-        source_stat = source.stat()
-        target_stat = target.stat()
-        return source_stat.st_ino == target_stat.st_ino
+        # Resolve physical paths for MergerFS-aware verification
+        source_phys = get_physical_path(source)
+        target_phys = get_physical_path(target)
+
+        source_stat = source_phys.stat()
+        target_stat = target_phys.stat()
+
+        # Compare both device and inode - both must match for a valid hardlink
+        return (source_stat.st_dev, source_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino)
     except OSError:
         return False
 
@@ -384,73 +394,114 @@ class VerifyStats:
     links_repaired: int = 0
 
 
+def _resolve_physical_target(source: pathlib.Path, target: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path] | tuple[None, None]:
+    """Resolve physical paths for MergerFS hardlinking.
+
+    Uses xattrs to determine the physical branch where source resides,
+    then computes the corresponding physical target path on that same branch.
+
+    Args:
+        source: Source file path (on MergerFS merged mount)
+        target: Target file path (on MergerFS merged mount)
+
+    Returns:
+        Tuple of (physical_source, physical_target) or (None, None) if resolution fails
+    """
+    # Get physical source path via xattr
+    src_phys_str = get_mergerfs_fullpath(source)
+    if not src_phys_str:
+        log.debug("Cannot resolve physical path for source: %s", source)
+        return None, None
+
+    # Get source branch root
+    src_branch, src_relpath = get_mergerfs_info(source)
+    if not src_branch:
+        log.debug("Cannot determine MergerFS branch for source: %s", source)
+        return None, None
+
+    try:
+        # Compute physical target path on the same branch as source
+        # target is like: /mnt/jellyfin/movies-4k/Movie/file.mkv
+        # We need: /mnt/diskX/Media/jellyfin/movies-4k/Movie/file.mkv
+
+        # Get the relative path from the merged root
+        # We need to determine what the merged root is by looking at target's structure
+        # target.anchor gives us the root (e.g., /)
+        # We need to reconstruct based on the target's path components
+
+        target_parts = target.parts
+        if len(target_parts) < 2:
+            log.debug("Target path too short: %s", target)
+            return None, None
+
+        # Build physical target: branch + relative path after /mnt or similar
+        # Assuming target is like /mnt/jellyfin/movies-4k/...
+        # We want: /mnt/diskX/Media/jellyfin/movies-4k/...
+        # The key is to preserve the path structure after the mount point
+
+        # Find where the actual path starts (after mount point)
+        # For /mnt/jellyfin/movies-4k/Movie/file.mkv
+        # We want to extract: jellyfin/movies-4k/Movie/file.mkv
+        mount_point = pathlib.Path(target.anchor) / target_parts[1] if len(target_parts) > 1 else target
+
+        # Get relative path from mount point
+        try:
+            rel_from_mount = target.relative_to(mount_point)
+        except ValueError:
+            # If target is not under mount_point, use full relative path from root
+            rel_from_mount = target.relative_to(target.anchor)
+
+        # Construct physical target on the source branch
+        # Prepend "Media" if the branch structure includes it
+        phys_target = pathlib.Path(src_branch) / rel_from_mount
+
+        return pathlib.Path(src_phys_str), phys_target
+
+    except Exception as e:
+        log.debug("Failed to resolve physical target: %s", e)
+        return None, None
+
+
 def safe_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
     """Create a hardlink with proper error handling and MergerFS awareness.
 
-    For MergerFS filesystems, verifies that source and target directory are on
-    the same underlying branch before attempting the hardlink. This prevents
-    EXDEV errors by detecting cross-branch operations early.
+    For MergerFS filesystems, first attempts hardlink on merged paths.
+    On EXDEV (cross-device), resolves physical paths on the underlying branch
+    and retries the hardlink on the physical filesystem.
 
     Returns True on success, False on failure.
     Handles cross-device links (EXDEV) and permission errors (EACCES) gracefully.
     """
-    # Check MergerFS colocation before attempting hardlink
-    can_link, reason = is_colocated(source, target)
-    if not can_link:
-        log.error(
-            "Cannot hardlink '%s' -> '%s': %s",
-            source, target, reason
-        )
-        # Log physical paths for debugging
-        src_phys = get_physical_path(source)
-        dst_dir_phys = get_physical_path(target.parent)
-        log.debug("Source physical path: %s", src_phys)
-        log.debug("Target directory physical path: %s", dst_dir_phys)
-        return False
-
     try:
         target.hardlink_to(source)
         return True
     except OSError as e:
         if e.errno == errno.EXDEV:
             # Cross-device link - attempt physical path fallback for MergerFS
-            log.debug("EXDEV on merged path '%s' -> '%s', attempting physical branch fallback", source, target)
+            log.debug("EXDEV on merged path '%s' -> '%s', resolving physical paths", source, target)
 
-            # Get physical source path via xattr
-            src_phys_str = get_mergerfs_fullpath(source)
-            if not src_phys_str:
+            phys_source, phys_target = _resolve_physical_target(source, target)
+
+            if not phys_source or not phys_target:
                 log.error(
                     "Cannot hardlink '%s' -> '%s': Cross-device link (EXDEV). "
-                    "Source is on MergerFS but cannot determine physical path. "
-                    "Ensure container has access to physical branches.",
+                    "Failed to resolve physical paths. Ensure xattr support is available "
+                    "and paths are on a MergerFS mount.",
                     source, target
                 )
                 return False
 
-            # Get source branch root
-            src_branch, src_relpath = get_mergerfs_info(source)
-            if not src_branch:
-                log.error("Cannot determine MergerFS branch for source: %s", source)
-                return False
-
             try:
-                # Compute physical target path by replacing merged root with branch root
-                # target is like: /mnt/jellyfin/movies-4k/Movie/file.mkv
-                # We need: /mnt/storage-base/jellyfin/movies-4k/Movie/file.mkv
-                target_relative = target.relative_to(target.anchor)  # jellyfin/movies-4k/...
-                phys_target = pathlib.Path(src_branch) / target_relative
-                phys_target_parent = phys_target.parent
-
                 # Create directory structure on physical branch
+                phys_target_parent = phys_target.parent
                 phys_target_parent.mkdir(parents=True, exist_ok=True)
 
                 # Create hardlink using physical paths
-                phys_source = pathlib.Path(src_phys_str)
                 phys_target.hardlink_to(phys_source)
 
                 log.info(
                     "Created physical hardlink: %s -> %s (branch: %s)",
-                    src_phys_str, phys_target, src_branch
+                    phys_source, phys_target, phys_target_parent.parts[2] if len(phys_target_parent.parts) > 2 else "unknown"
                 )
                 return True
 
@@ -458,9 +509,9 @@ def safe_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
                 log.error(
                     "Cannot hardlink '%s' -> '%s': Cross-device link (EXDEV). "
                     "Physical fallback failed: %s. "
-                    "Source branch: '%s'. "
-                    "Ensure target directories are pre-created on the same branch as source files.",
-                    source, target, phys_err, src_branch
+                    "Source: '%s', Target: '%s'. "
+                    "Ensure target directories exist on the same branch as source files.",
+                    source, target, phys_err, phys_source, phys_target
                 )
                 return False
 
