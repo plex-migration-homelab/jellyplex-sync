@@ -1439,3 +1439,43 @@ def sync(
     logging.info(summary)
 
     return 0
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Sync media libraries with hardlinks")
+    parser.add_argument("source", help="Source library path")
+    parser.add_argument("target", help="Target library path")
+    parser.add_argument("--dry-run", action="store_true", help="Don't make any changes")
+    parser.add_argument("--delete", action="store_true", help="Delete stray files in target")
+    parser.add_argument("--create", action="store_true", help="Create target directory if missing")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+    parser.add_argument("--debug", action="store_true", help="Debug logging")
+    parser.add_argument("--convert-to", choices=["plex", "jellyfin", "auto"], default="auto", help="Convert library structure")
+    parser.add_argument("--update-filenames", action="store_true", help="Update filenames if source changes")
+    parser.add_argument("--partial", help="Sync only a specific movie folder (partial path)")
+    parser.add_argument("--verify-only", action="store_true", help="Only verify existing links, don't sync")
+    parser.add_argument("--skip-verify", action="store_true", help="Skip inode verification for existing files")
+    parser.add_argument("--mergerfs-branches", nargs="+", help="List of MergerFS branches for validation")
+    parser.add_argument("--check-colocation", action="store_true", help="Check if source/target are colocated")
+
+    args = parser.parse_args()
+
+    sys.exit(sync(
+        args.source,
+        args.target,
+        dry_run=args.dry_run,
+        delete=args.delete,
+        create=args.create,
+        verbose=args.verbose,
+        debug=args.debug,
+        convert_to=args.convert_to,
+        update_filenames=args.update_filenames,
+        partial_path=args.partial,
+        verify_only=args.verify_only,
+        skip_verify=args.skip_verify,
+        mergerfs_branches=args.mergerfs_branches,
+        check_colocation=args.check_colocation,
+    ))
