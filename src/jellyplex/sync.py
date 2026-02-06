@@ -339,11 +339,31 @@ def verify_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
         source_phys = get_physical_path(source)
         target_phys = get_physical_path(target)
 
+        # If we are on MergerFS, we MUST resolve to physical paths
+        # If get_physical_path returns the same path, try manual resolution
+        if source_phys == source and _XATTR_AVAILABLE:
+             # Try to force find physical disk if xattr failed (e.g. if file is new)
+             found_src = _find_source_disk(source)
+             if found_src:
+                 source_phys = found_src
+             
+             found_dst = _find_source_disk(target)
+             if found_dst:
+                 target_phys = found_dst
+
         source_stat = source_phys.stat()
         target_stat = target_phys.stat()
 
-        # Compare both device and inode - both must match for a valid hardlink
-        return (source_stat.st_dev, source_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino)
+        match = (source_stat.st_dev, source_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino)
+        
+        if not match:
+            log.debug(
+                "Inode mismatch: %s (%s:%s) != %s (%s:%s)",
+                source_phys, source_stat.st_dev, source_stat.st_ino,
+                target_phys, target_stat.st_dev, target_stat.st_ino
+            )
+        
+        return match
     except OSError:
         return False
 
