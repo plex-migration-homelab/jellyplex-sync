@@ -453,28 +453,6 @@ def _resolve_physical_target(source: pathlib.Path, target: pathlib.Path) -> tupl
         phys_target = pathlib.Path(src_branch) / target_rel
         
         return pathlib.Path(src_phys_str), phys_target
-            # If source is /mnt/storage/Media/movies/Movie/file.mkv
-            # and src_relpath is Media/movies/Movie/file.mkv
-            # then the mount point is /mnt/storage
-            
-            # Find the mount point by removing src_relpath from source
-            source_str = str(source)
-            if src_relpath and source_str.endswith(src_relpath):
-                mount_point = pathlib.Path(source_str[:-len(src_relpath)])
-                
-                # Now compute target relative to mount point
-                try:
-                    target_rel = target.relative_to(mount_point)
-                    phys_target = pathlib.Path(src_branch) / target_rel
-                except ValueError:
-                    log.debug("Target not under mount point %s: %s", mount_point, target)
-                    return None, None
-            else:
-                log.debug("Cannot determine mount point from source: %s, relpath: %s", 
-                         source, src_relpath)
-                return None, None
-        
-        return pathlib.Path(src_phys_str), phys_target
 
     except Exception as e:
         log.debug("Failed to resolve physical target: %s", e)
