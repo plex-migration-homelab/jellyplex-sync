@@ -6,6 +6,7 @@ import re
 from collections.abc import Generator
 from dataclasses import dataclass
 import glob as pyglob
+from typing import Optional
 
 from .library import (
     ACCEPTED_ASSOCIATED_SUFFIXES,
@@ -22,9 +23,141 @@ from .plex import (
 )
 from . import utils
 
+# Optional xattr support for MergerFS branch detection
+try:
+    import xattr
+    _XATTR_AVAILABLE = True
+except ImportError:
+    _XATTR_AVAILABLE = False
+
 log = logging.getLogger(__name__)
 
 
+# ============================================================================
+# MergerFS Support Functions
+# ============================================================================
+
+MERGERFS_XATTR_BASEPATH = b"user.mergerfs.basepath"
+MERGERFS_XATTR_RELPATH = b"user.mergerfs.relpath"
+MERGERFS_XATTR_FULLPATH = b"user.mergerfs.fullpath"
+
+
+def get_mergerfs_info(filepath: pathlib.Path) -> tuple[str, str] | tuple[None, None]:
+    """Returns (branch, relpath) from MergerFS xattrs, or (None, None) if not available.
+
+    Args:
+        filepath: Path to a file or directory in the merged filesystem
+
+    Returns:
+        Tuple of (branch_path, relative_path) or (None, None) if xattrs unavailable
+        or not a MergerFS mount
+    """
+    if not _XATTR_AVAILABLE:
+        return None, None
+
+    try:
+        attrs = xattr.xattr(str(filepath))
+        branch = attrs.get(MERGERFS_XATTR_BASEPATH)
+        relpath = attrs.get(MERGERFS_XATTR_RELPATH)
+
+        # Decode and strip null terminators that MergerFS may include
+        branch_str = branch.decode("utf-8").rstrip("\x00")
+        relpath_str = relpath.decode("utf-8").rstrip("\x00")
+
+        return branch_str, relpath_str
+    except (KeyError, OSError, UnicodeDecodeError):
+        # KeyError: attribute doesn't exist (not MergerFS or not configured)
+        # OSError: file doesn't exist or no permissions
+        # UnicodeDecodeError: unexpected encoding in xattr
+        return None, None
+
+
+def get_mergerfs_fullpath(filepath: pathlib.Path) -> str | None:
+    """Returns the full physical path from MergerFS xattrs, or None if not available.
+
+    Args:
+        filepath: Path to a file or directory in the merged filesystem
+
+    Returns:
+        Full physical path on underlying branch, or None if not available
+    """
+    if not _XATTR_AVAILABLE:
+        return None
+
+    try:
+        attrs = xattr.xattr(str(filepath))
+        fullpath = attrs.get(MERGERFS_XATTR_FULLPATH)
+        return fullpath.decode("utf-8").rstrip("\x00")
+    except (KeyError, OSError, UnicodeDecodeError):
+        return None
+
+
+def is_colocated(src: pathlib.Path, dst: pathlib.Path) -> tuple[bool, str | None]:
+    """Check if source file and destination directory are on the same MergerFS branch.
+
+    For MergerFS filesystems, returns (True, None) if both paths are on the same
+    underlying branch. If on different branches, returns (False, reason_message).
+
+    For non-MergerFS filesystems, returns (True, None) always.
+
+    Args:
+        src: Source file path (must exist)
+        dst: Destination path (parent directory must exist for checking)
+
+    Returns:
+        Tuple of (can_hardlink, reason_if_cannot)
+    """
+    src_branch, _ = get_mergerfs_info(src)
+
+    # Not a MergerFS mount or xattrs unavailable - assume OK
+    if src_branch is None:
+        return True, None
+
+    # We have MergerFS - check if destination directory exists and is on same branch
+    dst_dir = dst.parent if dst.is_file() or dst.suffix else dst
+
+    if not dst_dir.exists():
+        # Destination directory doesn't exist yet - we can't verify colocation
+        # This is a case where we need to rely on precreation happening correctly
+        # Return True and let the hardlink attempt fail if it would cross branches
+        return True, None
+
+    dst_branch, _ = get_mergerfs_info(dst_dir)
+
+    # If we can't determine dst branch, assume it might be OK
+    if dst_branch is None:
+        return True, None
+
+    if src_branch != dst_branch:
+        reason = (
+            f"Cross-branch hardlink attempt: source on '{src_branch}', "
+            f"destination directory on '{dst_branch}'. "
+            f"Target must be on same physical disk as source for hardlinks to work."
+        )
+        return False, reason
+
+    return True, None
+
+
+def get_physical_path(filepath: pathlib.Path) -> pathlib.Path:
+    """Get the physical path on the underlying branch for a MergerFS path.
+
+    Useful for logging and debugging. Returns the original path if not MergerFS
+    or if xattrs are unavailable.
+
+    Args:
+        filepath: Path in the merged filesystem
+
+    Returns:
+        Path to the file on the underlying physical branch
+    """
+    fullpath = get_mergerfs_fullpath(filepath)
+    if fullpath:
+        return pathlib.Path(fullpath)
+    return filepath
+
+
+# ============================================================================
 # Minimum number of items expected in source library to proceed with --delete
 # Protects against wiping target when source mount fails
 MIN_SOURCE_ITEMS_FOR_DELETE = 1
@@ -57,19 +190,137 @@ def is_source_empty_or_unmounted(source_path: pathlib.Path) -> bool:
         return True
 
 
-def are_same_filesystem(path1: pathlib.Path, path2: pathlib.Path) -> bool:
-    """Check if two paths are on the same filesystem.
+def are_same_filesystem(
+    path1: pathlib.Path, path2: pathlib.Path, mergerfs_branches: Optional[list[str]] = None
+) -> tuple[bool, bool]:
+    """Check if two paths are on the same filesystem with MergerFS awareness.
 
-    Uses st_dev from stat() to compare device IDs. Returns True if both paths
-    are on the same filesystem, False otherwise.
+    For MergerFS filesystems, checks if both paths are on the same underlying
+    branch. For regular filesystems, compares st_dev from stat().
+
+    Args:
+        path1: First path to check
+        path2: Second path to check
+        mergerfs_branches: Optional list of known MergerFS branch paths for
+            additional validation (e.g., ["/mnt/disk1", "/mnt/disk2"])
+
+    Returns:
+        Tuple of (is_same, is_mergerfs):
+        - is_same: True if paths are on the same filesystem/branch
+        - is_mergerfs: True if path1 appears to be on a MergerFS mount
     """
+    # First try MergerFS detection
+    branch1, _ = get_mergerfs_info(path1)
+    branch2, _ = get_mergerfs_info(path2)
+
+    if branch1 is not None:
+        # We have MergerFS - check if branch2 is the same
+        if branch2 is not None:
+            return branch1 == branch2, True
+        # path1 is on MergerFS but we couldn't get info for path2
+        # This could mean path2 doesn't exist yet
+        return True, True  # Allow and let per-file checks handle it
+
+    # Check if path2 is on MergerFS (path1 is not)
+    if branch2 is not None:
+        # Mixed case - one is MergerFS, one is not
+        return False, False
+
+    # Neither is MergerFS (or xattrs unavailable) - fall back to st_dev
     try:
         stat1 = path1.stat()
         stat2 = path2.stat()
-        return stat1.st_dev == stat2.st_dev
+
+        # Additional check: if mergerfs_branches provided, verify neither path
+        # is directly under one of the branches (would indicate the caller
+        # should be using the merged path instead)
+        if mergerfs_branches:
+            path1_str = str(path1.resolve())
+            path2_str = str(path2.resolve())
+            for branch in mergerfs_branches:
+                if path1_str.startswith(branch) or path2_str.startswith(branch):
+                    log.warning(
+                        "Direct branch path detected. Using branch paths directly "
+                        "bypasses MergerFS. Consider using the merged path for consistency."
+                    )
+                    break
+
+        return stat1.st_dev == stat2.st_dev, False
     except OSError:
         # If we can't stat, assume different filesystems to be safe
+        return False, False
+
+
+def _check_library_colocation(
+    source_lib: MediaLibrary,
+    target_lib: MediaLibrary,
+    mergerfs_branches: list[str] | None,
+    verbose: bool = False,
+) -> bool:
+    """Check that sample files from source can be colocated with target directories.
+
+    This preflight check samples a few files from the source library and verifies
+    that their corresponding target directories are on the same MergerFS branch.
+    Helps catch misconfigured MergerFS precreation early.
+
+    Args:
+        source_lib: Source media library
+        target_lib: Target media library
+        mergerfs_branches: Optional list of known branch paths for detailed logging
+        verbose: Whether to print verbose progress messages
+
+    Returns:
+        True if all sampled files are properly colocated, False otherwise
+    """
+    sample_size = min(10, sum(1 for _ in source_lib.scan()))
+    if sample_size == 0:
+        log.warning("No movies found for colocation check")
+        return True
+
+    checked = 0
+    failed = 0
+
+    for entry, movie in source_lib.scan():
+        if checked >= sample_size:
+            break
+
+        target_name = target_lib.movie_name(movie)
+        target_path = target_lib.base_dir / target_name
+
+        # Find a sample file in the source entry
+        try:
+            for f in entry.iterdir():
+                if f.is_file():
+                    can_link, reason = is_colocated(f, target_path / f.name)
+                    if not can_link:
+                        log.error(
+                            "Colocation check failed for '%s': %s",
+                            entry.name, reason
+                        )
+                        failed += 1
+                    elif verbose:
+                        src_branch, _ = get_mergerfs_info(f)
+                        log.debug(
+                            "Colocation OK for '%s' (branch: %s)",
+                            entry.name, src_branch or "unknown"
+                        )
+                    checked += 1
+                    break
+        except OSError as e:
+            log.warning("Cannot check colocation for '%s': %s", entry.name, e)
+
+    if failed > 0:
+        log.error(
+            "Colocation check: %d/%d samples failed. "
+            "Target directories may be on wrong branches.",
+            failed, checked
+        )
         return False
+
+    if verbose:
+        log.info("Colocation check: %d/%d samples OK", checked, sample_size)
+
+    return True
 
 
 def verify_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
@@ -133,21 +384,50 @@ class VerifyStats:
 
 
 def safe_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
-    """Create a hardlink with proper error handling.
+    """Create a hardlink with proper error handling and MergerFS awareness.
+
+    For MergerFS filesystems, verifies that source and target directory are on
+    the same underlying branch before attempting the hardlink. This prevents
+    EXDEV errors by detecting cross-branch operations early.
 
     Returns True on success, False on failure.
     Handles cross-device links (EXDEV) and permission errors (EACCES) gracefully.
     """
+    # Check MergerFS colocation before attempting hardlink
+    can_link, reason = is_colocated(source, target)
+    if not can_link:
+        log.error(
+            "Cannot hardlink '%s' -> '%s': %s",
+            source, target, reason
+        )
+        # Log physical paths for debugging
+        src_phys = get_physical_path(source)
+        dst_dir_phys = get_physical_path(target.parent)
+        log.debug("Source physical path: %s", src_phys)
+        log.debug("Target directory physical path: %s", dst_dir_phys)
+        return False
+
     try:
         target.hardlink_to(source)
         return True
     except OSError as e:
         if e.errno == errno.EXDEV:
-            log.error(
-                "Cannot hardlink '%s' -> '%s': Cross-device link. "
-                "Source and target must be on the same filesystem.",
-                source, target
-            )
+            # Cross-device link - provide MergerFS-specific help if applicable
+            src_branch, _ = get_mergerfs_info(source)
+            if src_branch:
+                log.error(
+                    "Cannot hardlink '%s' -> '%s': Cross-device link (EXDEV). "
+                    "Source is on MergerFS branch '%s'. "
+                    "The target directory may have been created on a different branch. "
+                    "Ensure target directories are pre-created on the same branch as source files.",
+                    source, target, src_branch
+                )
+            else:
+                log.error(
+                    "Cannot hardlink '%s' -> '%s': Cross-device link. "
+                    "Source and target must be on the same filesystem.",
+                    source, target
+                )
         elif e.errno == errno.EACCES:
             log.error(
                 "Permission denied creating hardlink '%s' -> '%s'. "
@@ -803,6 +1083,8 @@ def sync(
     partial_path: str | None = None,
     verify_only: bool = False,
     skip_verify: bool = False,
+    mergerfs_branches: list[str] | None = None,
+    check_colocation: bool = False,
 ) -> int:
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -860,14 +1142,40 @@ def sync(
             return 1
 
     # Check if source and target are on the same filesystem (required for hard links)
-    if not are_same_filesystem(source_lib.base_dir, target_lib.base_dir):
-        log.error(
-            "Source '%s' and target '%s' are on different filesystems. "
-            "Hard links require both paths to be on the same filesystem. "
-            "Consider using a symbolic link or copy-based sync instead.",
-            source_lib.base_dir, target_lib.base_dir
-        )
+    same_fs, is_mergerfs = are_same_filesystem(source_lib.base_dir, target_lib.base_dir)
+    if not same_fs:
+        if is_mergerfs:
+            log.error(
+                "Source '%s' and target '%s' are on different MergerFS branches. "
+                "Hard links require both paths to be on the same underlying filesystem branch. "
+                "Ensure target directories are pre-created on the same disk as source files. "
+                "See the --mergerfs-branches option for branch validation.",
+                source_lib.base_dir, target_lib.base_dir
+            )
+        else:
+            log.error(
+                "Source '%s' and target '%s' are on different filesystems. "
+                "Hard links require both paths to be on the same filesystem. "
+                "Consider using a symbolic link or copy-based sync instead.",
+                source_lib.base_dir, target_lib.base_dir
+            )
         return 1
+
+    # Optional colocation check: verify sample files can be hardlinked to their
+    # corresponding target directories (catches misconfigured MergerFS early)
+    if check_colocation and is_mergerfs:
+        log.info("Running colocation check on sample files...")
+        colocation_ok = _check_library_colocation(
+            source_lib, target_lib, mergerfs_branches, verbose=verbose
+        )
+        if not colocation_ok:
+            log.error(
+                "Colocation check failed. Some source files cannot be hardlinked to "
+                "target directories because they are on different MergerFS branches. "
+                "Ensure target directories are pre-created on the same disk as source files."
+            )
+            return 1
+        log.info("Colocation check passed: all sample files are properly colocated")
 
     if verify_only:
         log.info("VERIFY-ONLY mode: Checking existing hard links without making changes")

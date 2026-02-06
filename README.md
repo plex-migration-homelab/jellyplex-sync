@@ -106,6 +106,12 @@ jellyplex-sync [OPTIONS] /path/to/jellyfin/library /path/to/plex/library
 - `--skip-verify`
   Skip inode verification for faster syncs when you trust existing links. By default, the script verifies that each hard link in the target shares the same inode as the source file, automatically repairing any broken links found. Use this flag to skip verification and speed up syncs on large libraries where you're confident the existing links are valid.
 
+- `--mergerfs-branches=<paths>`
+  Comma-separated list of known MergerFS branch paths (e.g., `/mnt/disk1,/mnt/disk2`). Used for validation and debugging when working with MergerFS union filesystems. See "MergerFS Support" section below for details.
+
+- `--check-colocation`
+  Verify that source files and target directories are on the same MergerFS branch before syncing. This preflight check samples files from the source and verifies they can be hardlinked to their corresponding target directories. Fails early if branches don't match, preventing partial syncs. Recommended for MergerFS setups.
+
 ## Examples
 
 Mirror a Jellyfin library into an empty Plex structure:
@@ -329,6 +335,70 @@ If you're switching from the original [sniner/jellyplex-sync](https://github.com
 
 To migrate, simply run the updated tool against your existing libraries. Use `--dry-run` first to preview what new files will be added.
 
+## MergerFS Support
+
+This fork includes enhanced support for MergerFS (union filesystem) setups, particularly those using the `create=ff` (first-found) policy with cache tiering. Hard links require source and target to be on the same underlying filesystem branch, which can be challenging with MergerFS when target directories are created on different disks than source files.
+
+### How It Works
+
+The tool uses MergerFS extended attributes to determine which physical branch each file resides on:
+- `user.mergerfs.basepath` - The physical branch path (e.g., `/mnt/disk1`)
+- `user.mergerfs.relpath` - Relative path within that branch
+- `user.mergerfs.fullpath` - Full physical path
+
+These attributes require the `attr` package on the host system and the `xattr` Python module (automatically installed with this tool).
+
+### Key Features
+
+- **Branch-aware hard linking**: The tool checks if source and target are on the same MergerFS branch before attempting hard links, providing clear error messages about which branches are involved if they differ.
+- **Colocation verification**: Use `--check-colocation` to sample files and verify they can be hardlinked to their target directories before starting a full sync.
+- **Branch validation**: Use `--mergerfs-branches` to specify known branch paths for additional validation.
+
+### Requirements
+
+- **Host system**: `apt install attr` (provides `getfattr` command)
+- **Docker image**: Already includes `attr` package and `xattr` Python module
+- **MergerFS configuration**: xattrs must be enabled (default in most MergerFS setups)
+
+### Example Usage with MergerFS
+
+```bash
+# Basic sync with MergerFS colocation checking
+jellyplex-sync --check-colocation /mnt/storage/movies /mnt/storage/jellyfin/movies
+
+# With explicit branch validation
+jellyplex-sync \
+    --mergerfs-branches "/mnt/disk1,/mnt/disk2,/mnt/disk3,/mnt/downloads" \
+    --check-colocation \
+    /mnt/storage/movies /mnt/storage/jellyfin/movies
+
+# Dry-run to see what would happen without making changes
+jellyplex-sync --dry-run --verbose /mnt/storage/movies /mnt/storage/jellyfin/movies
+```
+
+### Troubleshooting MergerFS Issues
+
+**Error: "Cross-branch hardlink attempt"**
+
+This means the target directory exists on a different physical disk than the source file. Solutions:
+1. Ensure target directories are pre-created on the same disk as source files (use the provided Ansible script)
+2. Remove the target directory and let the sync tool create it on the correct branch
+3. Use `--dry-run` first to preview any issues
+
+**Error: "getfattr not found"**
+
+Install the `attr` package on your host system:
+```bash
+apt install attr  # Debian/Ubuntu
+```
+
+**Verifying xattrs work:**
+```bash
+# Test on any file in your MergerFS mount
+getfattr -n user.mergerfs.basepath /mnt/storage/movies/somefile.mkv
+# Should output: user.mergerfs.basepath="/mnt/disk1"
+```
+
 ## Differences from Upstream
 
 This fork differs from the original [sniner/jellyplex-sync](https://github.com/sniner/jellyplex-sync) in the following ways:
@@ -339,6 +409,7 @@ This fork differs from the original [sniner/jellyplex-sync](https://github.com/s
 - **Provider tag preservation**: File-level provider tags (`{tmdb-xxx}`, `{imdb-xxx}`) are preserved from source filenames to target filenames, ensuring correct media identification even when folder-level metadata is insufficient.
 - **Stale link handling**: Detects and optionally renames existing hardlinks that have outdated filenames (via `--update-filenames`), preventing duplicates when naming conventions change.
 - **Hard link verification**: Automatically verifies and repairs broken hard links by checking inode matches. Includes `--verify-only` mode for auditing and `--skip-verify` for faster syncs. Detects and prevents cross-filesystem sync attempts.
+- **MergerFS support**: Enhanced support for MergerFS union filesystems with branch detection via extended attributes, colocation verification, and clear error messages when source and target are on different physical branches.
 - **Backwards compatibility**: Fully compatible with existing synced libraries created by the original tool. No breaking changes to library structure or naming conventions.
 
 ## License

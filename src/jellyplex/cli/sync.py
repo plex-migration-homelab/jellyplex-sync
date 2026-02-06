@@ -23,6 +23,10 @@ def main() -> None:
     parser.add_argument("--update-filenames", action="store_true", help="Rename existing hardlinks if they have outdated names")
     parser.add_argument("--verify-only", action="store_true", help="Check all existing hard links without making changes, report any broken links")
     parser.add_argument("--skip-verify", action="store_true", help="Skip inode verification for faster syncs when you trust existing links")
+    parser.add_argument("--mergerfs-branches", type=str, metavar="PATH",
+        help="Comma-separated list of MergerFS branch paths (e.g., '/mnt/disk1,/mnt/disk2') for branch validation")
+    parser.add_argument("--check-colocation", action="store_true",
+        help="Verify that source files and target directories are on the same MergerFS branch before syncing")
 
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--partial", help="Sync only the specified movie folder path")
@@ -61,6 +65,11 @@ def main() -> None:
         logging.info(f"Radarr hook triggered for movie: {movie_title}")
         partial_path = radarr_path
 
+    # Parse MergerFS branches if provided
+    mergerfs_branches = None
+    if args.mergerfs_branches:
+        mergerfs_branches = [b.strip() for b in args.mergerfs_branches.split(",") if b.strip()]
+
     result = 0
     try:
         result = jp.sync(
@@ -76,6 +85,8 @@ def main() -> None:
             partial_path=partial_path,
             verify_only=args.verify_only,
             skip_verify=args.skip_verify,
+            mergerfs_branches=mergerfs_branches,
+            check_colocation=args.check_colocation,
         )
     except KeyboardInterrupt:
         logging.info("INTERRUPTED")
