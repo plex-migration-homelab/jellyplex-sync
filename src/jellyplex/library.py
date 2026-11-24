@@ -15,6 +15,16 @@ ACCEPTED_ASSOCIATED_SUFFIXES = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", 
 RESOLUTION_PATTERN = re.compile(r"\d{3,4}[pi]$")
 
 
+# Trash and filesystem housekeeping folders are never movies. Without this the
+# sync mirrored movies/_trash into the Jellyfin library, and --delete would
+# purge anything placed in the target's _trash before its grace period ended.
+IGNORED_FOLDER_NAMES = {"_trash", "lost+found"}
+
+
+def is_ignored_folder(name: str) -> bool:
+    return name in IGNORED_FOLDER_NAMES or name.startswith(".Trash")
+
+
 @dataclass
 class MovieInfo:
     """Metadata for the whole movie"""
@@ -75,6 +85,9 @@ class MediaLibrary(ABC):
                         if not entry.is_dir(follow_symlinks=False):
                             continue
                     except OSError:
+                        continue
+
+                    if is_ignored_folder(entry.name):
                         continue
 
                     entry_path = pathlib.Path(entry.path)

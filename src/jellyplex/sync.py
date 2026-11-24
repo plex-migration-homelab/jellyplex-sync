@@ -14,6 +14,7 @@ from .library import (
     MovieInfo,
     VideoInfo,
     MediaLibrary,
+    is_ignored_folder,
 )
 from .jellyfin import (
     JellyfinLibrary,
@@ -743,6 +744,8 @@ def scan_media_library(
 
     # Remove stray items in target library
     for entry in target.base_dir.iterdir():
+        if is_ignored_folder(entry.name):
+            continue
         if entry.name not in movies_to_sync:
             if delete:
                 if dry_run:
