@@ -157,13 +157,41 @@ def get_physical_path(filepath: pathlib.Path) -> pathlib.Path:
     Returns:
         Path to the file on the underlying physical branch
     """
-    fullpath = get_mergerfs_fullpath(filepath)
-    if fullpath:
-        return pathlib.Path(fullpath)
-    return filepath
+    # Follow the xattr through stacked pools: /mnt/storage's branch is the
+    # /mnt/storage-base pool, whose branch is the real /mnt/diskN. One hop only
+    # reaches another FUSE path.
+    current = filepath
+    for _ in range(4):
+        fullpath = get_mergerfs_fullpath(current)
+        if not fullpath or fullpath == str(current):
+            break
+        current = pathlib.Path(fullpath)
+    return current
+
+
+# Roots of the physical branches behind the pools on this fileserver
+PHYSICAL_ROOT_PREFIXES = ("/mnt/disk", "/mnt/downloads/")
+
+
+def _is_physical(path: pathlib.Path) -> bool:
+    """True if path is on a raw branch disk rather than a MergerFS pool."""
+    return str(path).startswith(PHYSICAL_ROOT_PREFIXES)
+
+
+def resolve_physical(path: pathlib.Path) -> pathlib.Path | None:
+    """Physical branch path for path: authoritative xattr first, disk probe as fallback."""
+    phys = get_physical_path(path)
+    if _is_physical(phys):
+        return phys
+    return _find_source_disk(path)
 
 
 # ============================================================================
+# Exit code when the run completed but conflicts made it skip movies.
+# Distinct from 1 (error) so callers can tell "retry may help" from "a human
+# has to remove a duplicate".
+EXIT_CONFLICTS = 3
+
 # Minimum number of items expected in source library to proceed with --delete
 # Protects against wiping target when source mount fails
 MIN_SOURCE_ITEMS_FOR_DELETE = 1
@@ -341,21 +369,13 @@ def verify_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
     False otherwise.
     """
     try:
-        # Resolve physical paths for MergerFS-aware verification
-        source_phys = get_physical_path(source)
-        target_phys = get_physical_path(target)
-
-        # If we are on MergerFS, we MUST resolve to physical paths
-        # If get_physical_path returns the same path, try manual resolution
-        if source_phys == source and _XATTR_AVAILABLE:
-             # Try to force find physical disk if xattr failed (e.g. if file is new)
-             found_src = _find_source_disk(source)
-             if found_src:
-                 source_phys = found_src
-             
-             found_dst = _find_source_disk(target)
-             if found_dst:
-                 target_phys = found_dst
+        # Resolve each side to its physical branch independently. The old code
+        # only probed disks when the *source* xattr lookup failed, which is
+        # always the case for raw /mnt/diskN paths (the queue wrapper's mode),
+        # and the probe returns the first disk holding that relative path -
+        # possibly a different disk than the one actually being synced.
+        source_phys = source if _is_physical(source) else (resolve_physical(source) or source)
+        target_phys = target if _is_physical(target) else (resolve_physical(target) or target)
 
         source_stat = source_phys.stat()
         target_stat = target_phys.stat()
@@ -401,8 +421,7 @@ def repair_hardlink(
         return True
 
     try:
-        target.unlink()
-        if safe_hardlink(source, target):
+        if relink_atomically(source, target):
             log.info("Repaired hard link: %s", target)
             return True
         return False
@@ -525,8 +544,9 @@ def _resolve_physical_target(source: pathlib.Path, target: pathlib.Path) -> tupl
     then computes the corresponding target path on that same disk.
     """
     try:
-        # Find the real physical disk containing the source file
-        source_phys = _find_source_disk(source)
+        # Find the real physical disk containing the source file (xattr first:
+        # probing picks the lowest-numbered disk that has the same path)
+        source_phys = resolve_physical(source)
         if not source_phys:
             log.debug("Could not find source file on any physical disk: %s", source)
             return None, None
@@ -610,11 +630,40 @@ def safe_hardlink(source: pathlib.Path, target: pathlib.Path) -> bool:
         return False
 
 
+def relink_atomically(source: pathlib.Path, target: pathlib.Path) -> bool:
+    """Make target a hardlink to source with no window where target is missing.
+
+    Links to a hidden temp name next to target, then renames over it. The old
+    unlink-then-link left the Jellyfin library without the file whenever the
+    link failed (EXDEV, ENOSPC, permissions). On MergerFS the rename also drops
+    stale copies of target on other branches.
+    """
+    tmp = target.with_name(f".{target.name}.jellyplex-tmp")
+    try:
+        if tmp.exists() or tmp.is_symlink():
+            tmp.unlink()
+    except OSError:
+        pass
+    if not safe_hardlink(source, tmp):
+        return False
+    try:
+        os.replace(tmp, target)
+        return True
+    except OSError as e:
+        log.error("Failed to move relinked file into place '%s': %s", target, e)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
 @dataclass
 class LibraryStats:
     movies_total: int = 0
     movies_processed: int = 0
     items_removed: int = 0
+    conflicts: int = 0
 
 
 def resolve_movie_folder(source_lib: MediaLibrary, partial_path: str) -> pathlib.Path | None:
@@ -682,6 +731,7 @@ def scan_media_library(
             quoted = [f"'{s}'" for s in src]
             log.error(f"Conflicting folders: {', '.join(quoted)} → '{dst}'")
         log.info("You have to solve the conflicts first to proceed")
+        stats.conflicts += len(conflicting_source_dirs)
         return
 
     # Yield items for sync
@@ -794,10 +844,8 @@ def process_assets_folder(
                             stats.links_broken += 1
                         elif dry_run:
                             log.info("RELINK %s", entry)
-                        else:
-                            dest.unlink()
-                            if safe_hardlink(entry, dest):
-                                stats.files_linked += 1
+                        elif relink_atomically(entry, dest):
+                            stats.files_linked += 1
                 except OSError as e:
                     log.warning("Cannot check file '%s': %s", dest, e)
                     continue
@@ -840,6 +888,7 @@ class MovieStats:
     links_verified: int = 0
     links_broken: int = 0
     links_repaired: int = 0
+    conflicts: int = 0
 
 
 def process_movie(
@@ -885,8 +934,12 @@ def process_movie(
             video_path = target.video_path(movie, video or VideoInfo(extension=entry.suffix.lower()))
             video_name = video_path.name
             if video_name in videos_to_sync:
-                log.error("Conflicting video file '%s'. Aborting.", entry.name)
-                return MovieStats()
+                log.error(
+                    "Conflicting video file '%s' in '%s': another file maps to '%s'. "
+                    "Skipping this movie until the duplicate is removed.",
+                    entry.name, source_path.name, video_name,
+                )
+                return MovieStats(conflicts=1)
             videos_to_sync[video_name] = (entry, video_path)
             stats.videos_total += 1
 
@@ -979,7 +1032,9 @@ def process_movie(
                 if dry_run:
                     log.info("DELETE %s", item[1])
                 else:
-                    item[1].unlink()
+                    if relink_atomically(item[0], item[1]):
+                        stats.videos_linked += 1
+                    continue
         else:
             # Check if any existing file in the target folder is a hardlink to the source file
             # This happens if the filename has changed (e.g. edition added)
@@ -1147,10 +1202,8 @@ def process_movie(
                         elif dry_run:
                             log.info("RELINK %s", item[0])
                             stats.asset_items_linked += 1
-                        else:
-                            item[1].unlink()
-                            if safe_hardlink(item[0], item[1]):
-                                stats.asset_items_linked += 1
+                        elif relink_atomically(item[0], item[1]):
+                            stats.asset_items_linked += 1
                 except OSError as e:
                     log.warning("Cannot check associated file '%s': %s", item[1], e)
                     continue
@@ -1353,6 +1406,7 @@ def sync(
     stat_links_verified: int = 0
     stat_links_broken: int = 0
     stat_links_repaired: int = 0
+    stat_conflicts: int = 0
     lib_stats = LibraryStats()
 
     if partial_path:
@@ -1386,6 +1440,7 @@ def sync(
             stat_links_verified += s.links_verified
             stat_links_broken += s.links_broken
             stat_links_repaired += s.links_repaired
+            stat_conflicts += s.conflicts
     else:
         for src, _, movie in scan_media_library(source_lib, target_lib, delete=delete, dry_run=dry_run, stats=lib_stats):
             s = process_movie(
@@ -1406,8 +1461,10 @@ def sync(
             stat_links_verified += s.links_verified
             stat_links_broken += s.links_broken
             stat_links_repaired += s.links_repaired
+            stat_conflicts += s.conflicts
 
         stat_items_removed += lib_stats.items_removed
+        stat_conflicts += lib_stats.conflicts
 
     # Build summary message
     if verify_only:
@@ -1438,6 +1495,11 @@ def sync(
         summary = ", ".join(summary_parts) + "."
     logging.info(summary)
 
+    # Conflicts skip whole movies (or, at folder level, the whole library) and
+    # used to exit 0, so the same movies silently stayed unsynced every run.
+    if stat_conflicts:
+        log.error("%d conflict(s) skipped; resolve the duplicates listed above", stat_conflicts)
+        return EXIT_CONFLICTS
     return 0
 
 
