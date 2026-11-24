@@ -419,3 +419,16 @@ This project is licensed under the [BSD 2-Clause License](./LICENSE).
 ## Disclaimer
 
 This is a private project written for personal use. It doesn't cover all use cases or environments. Use at your own risk. Contributions or forks are welcome if you want to adapt it to your own setup.
+
+### Protected folders and cleanup failures
+
+Place an empty `.jellyplex-sync-ignore` file at a library root, in a movie
+folder, or in an asset folder. A marked library root skips that run. A marked
+folder and its descendants are excluded, and marking a source folder preserves
+its existing mirror in the target. Target cleanup also preserves a stray
+directory if it contains a marked descendant. The marker is never synced.
+
+Hidden directories, `_trash`, and `lost+found` at a library root are excluded.
+When cleanup cannot remove an item, the summary reports it separately and
+sync exits with code 4. Duplicate-name conflicts use exit code 3 unless the
+same run also has a removal failure. Dry runs report planned removals separately.

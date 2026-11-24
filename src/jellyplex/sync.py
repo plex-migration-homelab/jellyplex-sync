@@ -192,6 +192,7 @@ def resolve_physical(path: pathlib.Path) -> pathlib.Path | None:
 # Distinct from 1 (error) so callers can tell "retry may help" from "a human
 # has to remove a duplicate".
 EXIT_CONFLICTS = 3
+EXIT_REMOVE_ERRORS = 4
 
 # Minimum number of items expected in source library to proceed with --delete
 # Protects against wiping target when source mount fails
@@ -214,7 +215,7 @@ def is_source_empty_or_unmounted(source_path: pathlib.Path) -> bool:
             dir_count = 0
             for entry in entries:
                 # Only count directories (movie folders)
-                if entry.is_dir(follow_symlinks=False):
+                if entry.is_dir(follow_symlinks=False) and not is_ignored_folder(entry.name):
                     dir_count += 1
                     if dir_count >= MIN_SOURCE_ITEMS_FOR_DELETE:
                         return False
@@ -663,6 +664,8 @@ def relink_atomically(source: pathlib.Path, target: pathlib.Path) -> bool:
 class LibraryStats:
     movies_total: int = 0
     movies_processed: int = 0
+    remove_errors: int = 0
+    removals_planned: int = 0
     items_removed: int = 0
     conflicts: int = 0
 
@@ -680,7 +683,7 @@ def resolve_movie_folder(source_lib: MediaLibrary, partial_path: str) -> pathlib
             # This checks if path is subpath of source_lib.base_dir
             # We resolve to handle symlinks or relative paths
             if source_lib.base_dir.resolve() in path.resolve().parents or source_lib.base_dir.resolve() == path.resolve():
-                return path
+                return path.resolve()
         except Exception:
             pass
 
@@ -688,10 +691,63 @@ def resolve_movie_folder(source_lib: MediaLibrary, partial_path: str) -> pathlib
     # This handles Docker path remapping
     folder_name = path.name
     candidate = source_lib.base_dir / folder_name
-    if candidate.exists() and candidate.is_dir():
+    if candidate.is_dir() and not candidate.is_symlink():
         return candidate
 
     return None
+
+
+IGNORE_MARKER = ".jellyplex-sync-ignore"
+
+
+@dataclass(frozen=True)
+class MarkerGuard:
+    aliases: tuple[tuple[pathlib.Path, pathlib.Path], ...] = ()
+
+    def views(self, path: pathlib.Path) -> Generator[pathlib.Path, None, None]:
+        yield path
+        for root, alias in self.aliases:
+            if path.is_relative_to(root):
+                yield alias / path.relative_to(root)
+
+    def marked(self, path: pathlib.Path) -> bool:
+        for view in self.views(path):
+            marker = view / IGNORE_MARKER
+            if view.is_dir() and not view.is_symlink() and marker.is_file() and not marker.is_symlink():
+                log.info("Skipping marked folder %s", view)
+                return True
+        return False
+
+    def protects_removal(self, path: pathlib.Path) -> bool:
+        if path.is_symlink():
+            return False
+        for view in self.views(path):
+            if not view.is_dir() or view.is_symlink():
+                continue
+            def scan_error(error):
+                raise error
+            try:
+                for folder, _, files in os.walk(view, onerror=scan_error):
+                    if IGNORE_MARKER in files and self.marked(path / pathlib.Path(folder).relative_to(view)):
+                        return True
+            except OSError as error:
+                log.warning("Keeping %s because marker inspection failed: %s", view, error)
+                return True
+        return False
+
+
+def remove_stray(entry, stats, dry_run, markers):
+    if markers.protects_removal(entry):
+        return
+    if dry_run:
+        log.info("DELETE %s", entry)
+        stats.removals_planned += 1
+    else:
+        log.info("Removing stray item %s", entry)
+        if utils.remove(entry):
+            stats.items_removed += 1
+        else:
+            stats.remove_errors += 1
 
 
 def scan_media_library(
@@ -701,6 +757,7 @@ def scan_media_library(
     dry_run: bool = False,
     delete: bool = False,
     stats: LibraryStats | None = None,
+    markers: MarkerGuard = MarkerGuard(),
 ) -> Generator[tuple[pathlib.Path, pathlib.Path, MovieInfo], None, None]:
     """Iterate over the source library and determine all movie folders.
     Yields a tuple for each movie folder:
@@ -716,6 +773,7 @@ def scan_media_library(
     # Inspect source libary for movie folders to sync
     for entry, movie in source.scan():
         target_name = target.movie_name(movie)
+        marked = markers.marked(entry)
         if target_name in movies_to_sync:
             if target_name not in conflicting_source_dirs:
                 item = movies_to_sync[target_name]
@@ -723,7 +781,7 @@ def scan_media_library(
             conflicting_source_dirs[target_name].append(entry.name)
             movies_to_sync[target_name] = None
         else:
-            movies_to_sync[target_name] = (entry, movie)
+            movies_to_sync[target_name] = None if marked else (entry, movie)
         stats.movies_total += 1
 
     # If there are any conflicts we bail out now
@@ -742,27 +800,25 @@ def scan_media_library(
         stats.movies_processed += 1
         yield item[0], target.base_dir / target_name, item[1]
 
-    # Remove stray items in target library
-    for entry in target.base_dir.iterdir():
-        if is_ignored_folder(entry.name):
-            continue
-        if entry.name not in movies_to_sync:
+    if target.base_dir.is_dir():
+        for entry in target.base_dir.iterdir():
+            if entry.name in movies_to_sync or (
+                is_ignored_folder(entry.name)
+                and (entry.is_dir() or not entry.name.startswith(".") or entry.name.startswith(".Trash"))
+            ):
+                continue
             if delete:
-                if dry_run:
-                    log.info("DELETE %s", entry)
-                else:
-                    log.info("Removing stray item '%s' in target library", entry.name)
-                    utils.remove(entry)
-                stats.items_removed += 1
-            else:
-                if not dry_run:
-                    log.info("Stray item '%s' found", entry.name)
+                remove_stray(entry, stats, dry_run, markers)
+            elif not dry_run:
+                log.info("Stray item '%s' found", entry.name)
 
 
 @dataclass
 class AssetStats:
     files_total: int = 0
     files_linked: int = 0
+    remove_errors: int = 0
+    removals_planned: int = 0
     items_removed: int = 0
     links_verified: int = 0
     links_broken: int = 0
@@ -779,7 +835,11 @@ def process_assets_folder(
     verify_only: bool = False,
     skip_verify: bool = False,
     stats: AssetStats | None = None,
+    markers: MarkerGuard = MarkerGuard(),
 ) -> AssetStats:
+    stats = stats or AssetStats()
+    if markers.marked(source_path) or markers.marked(target_path):
+        return stats
     if not source_path.is_dir():
         raise ValueError(f"{source_path!s} is not a folder")
 
@@ -799,7 +859,7 @@ def process_assets_folder(
     # Hardlink missing files and dive into subfolders
     for entry in source_path.iterdir():
         # Skip symlinks to avoid unexpected behavior
-        if entry.is_symlink():
+        if entry.name == IGNORE_MARKER or entry.is_symlink():
             log.debug("Skipping symlink '%s'", entry.name)
             continue
 
@@ -813,6 +873,7 @@ def process_assets_folder(
                 delete=delete,
                 verify_only=verify_only,
                 skip_verify=skip_verify,
+                markers=markers,
             )
         elif entry.is_file():
             # Skip zero-byte files (likely placeholders or corrupt)
@@ -868,14 +929,9 @@ def process_assets_folder(
     if delete and not verify_only and target_path.is_dir():
         # Remove stray items
         for entry in target_path.iterdir():
-            if entry.name in synced_items:
+            if entry.name in synced_items or markers.marked(source_path / entry.name):
                 continue
-            log.info("Removing stray item '%s' in target folder", entry.name)
-            if dry_run:
-                log.info("DELETE %s", entry.name)
-            else:
-                utils.remove(entry)
-            stats.items_removed += 1
+            remove_stray(entry, stats, dry_run, markers)
 
     return stats
 
@@ -884,6 +940,8 @@ def process_assets_folder(
 class MovieStats:
     videos_total: int = 0
     videos_linked: int = 0
+    remove_errors: int = 0
+    removals_planned: int = 0
     items_removed: int = 0
     asset_items_total: int = 0
     asset_items_linked: int = 0
@@ -906,8 +964,11 @@ def process_movie(
     update_filenames: bool = False,
     verify_only: bool = False,
     skip_verify: bool = False,
+    markers: MarkerGuard = MarkerGuard(),
 ) -> MovieStats:
     target_path = target.movie_path(movie)
+    if markers.marked(source_path) or markers.marked(target_path):
+        return MovieStats()
 
     if verbose:
         log.info(f"Processing '{source_path.name}' → '{target_path.name}'")
@@ -1062,6 +1123,8 @@ def process_movie(
                 # Otherwise, only rename if the editions match exactly.
                 editions_match = intended_video and candidate_video and intended_video.edition == candidate_video.edition
 
+                if verify_only:
+                    continue
                 if update_filenames or editions_match:
                     if update_filenames:
                         if dry_run:
@@ -1135,18 +1198,9 @@ def process_movie(
             if entry.name in videos_to_sync or entry.name in assets_to_sync:
                 continue
             # Don't delete preserved stale files (valid hardlinks with outdated names)
-            if entry.name in preserved_stale_files:
+            if entry.name in preserved_stale_files or markers.marked(source_path / entry.name):
                 continue
-            if dry_run:
-                log.info("DELETE %s", entry)
-            else:
-                log.info(
-                    "Removing stray item '%s' in movie folder '%s'",
-                    entry.name,
-                    target_path.relative_to(target.base_dir),
-                )
-                utils.remove(entry)
-            stats.items_removed += 1
+            remove_stray(entry, stats, dry_run, markers)
 
     # Sync assets folders and associated files
     for _, item in assets_to_sync.items():
@@ -1163,10 +1217,13 @@ def process_movie(
                 dry_run=dry_run,
                 verify_only=verify_only,
                 skip_verify=skip_verify,
+                markers=markers,
             )
             stats.asset_items_total += s.files_total
             stats.asset_items_linked += s.files_linked
             stats.asset_items_removed += s.items_removed
+            stats.remove_errors += s.remove_errors
+            stats.removals_planned += s.removals_planned
             stats.links_verified += s.links_verified
             stats.links_broken += s.links_broken
             stats.links_repaired += s.links_repaired
@@ -1243,7 +1300,8 @@ def _scan_for_video_files(path: pathlib.Path, max_files: int = 100) -> Generator
                         return
                     try:
                         if entry.is_dir(follow_symlinks=False):
-                            dirs_to_scan.append(pathlib.Path(entry.path))
+                            if current_dir != path or not is_ignored_folder(entry.name):
+                                dirs_to_scan.append(pathlib.Path(entry.path))
                         elif entry.is_file(follow_symlinks=False):
                             entry_path = pathlib.Path(entry.path)
                             if entry_path.suffix.lower() in ACCEPTED_VIDEO_SUFFIXES:
@@ -1308,12 +1366,28 @@ def sync(
     skip_verify: bool = False,
     mergerfs_branches: list[str] | None = None,
     check_colocation: bool = False,
+    marker_source_root: str | None = None,
+    marker_target_root: str | None = None,
 ) -> int:
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
     source_path = pathlib.Path(source)
     target_path = pathlib.Path(target)
+
+    if not source_path.is_dir():
+        log.error("Source directory '%s' does not exist", source_path)
+        return 1
+    if verify_only:
+        delete = False
+
+    markers = MarkerGuard(tuple(
+        (root.resolve(), pathlib.Path(alias).resolve())
+        for root, alias in ((source_path, marker_source_root), (target_path, marker_target_root))
+        if alias
+    ))
+    if markers.marked(source_path.resolve()) or markers.marked(target_path.resolve()):
+        return 0
 
     if not convert_to or convert_to == "auto":
         source_type = determine_library_type(source_path)
@@ -1342,10 +1416,6 @@ def sync(
             target_lib.shortname().capitalize(),
         )
 
-    if not source_lib.base_dir.is_dir():
-        log.error("Source directory '%s' does not exist", source_lib.base_dir)
-        return 1
-
     # Safeguard: Check if source directory appears empty (possible mount failure)
     # This prevents accidentally wiping the target when --delete is used
     if delete and not partial_path and is_source_empty_or_unmounted(source_lib.base_dir):
@@ -1357,15 +1427,46 @@ def sync(
         )
         return 1
 
+    movie_folder = movie_info = None
+    if partial_path:
+        movie_folder = resolve_movie_folder(source_lib, partial_path)
+        if movie_folder is None:
+            log.error("Could not resolve movie folder for partial path: %s", partial_path)
+            return 1
+        relative = movie_folder.relative_to(source_lib.base_dir)
+        if not relative.parts or is_ignored_folder(relative.parts[0]):
+            log.info("Skipping excluded folder %s", movie_folder)
+            return 0
+        if any(markers.marked(source_lib.base_dir.joinpath(*relative.parts[:depth]))
+               for depth in range(1, len(relative.parts) + 1)):
+            return 0
+        movie_info = source_lib.parse_movie_path(movie_folder)
+        if movie_info is None:
+            log.warning("Could not parse movie info from folder: %s", movie_folder)
+            return 1
+        target_movie = target_lib.movie_path(movie_info)
+        if any(
+            entry != movie_folder and target_lib.movie_path(movie) == target_movie and markers.marked(entry)
+            for entry, movie in source_lib.scan()
+        ):
+            log.error("Partial sync would overwrite an excluded mirror: %s", target_movie)
+            return EXIT_CONFLICTS
+        if markers.marked(target_movie):
+            return 0
+
     if not target_lib.base_dir.is_dir():
         if create:
-            target_lib.base_dir.mkdir(parents=True)
+            if not (dry_run or verify_only):
+                target_lib.base_dir.mkdir(parents=True)
         else:
             log.error("Target directory '%s' does not exist", target_lib.base_dir)
             return 1
 
     # Check if source and target are on the same filesystem (required for hard links)
-    same_fs, is_mergerfs = are_same_filesystem(source_lib.base_dir, target_lib.base_dir)
+    existing_target = next(
+        path for path in (target_lib.base_dir, *target_lib.base_dir.parents) if path.is_dir()
+    )
+    same_fs, is_mergerfs = are_same_filesystem(source_lib.base_dir, existing_target)
     if not same_fs:
         if is_mergerfs:
             log.error(
@@ -1410,64 +1511,44 @@ def sync(
     stat_links_broken: int = 0
     stat_links_repaired: int = 0
     stat_conflicts: int = 0
+    remove_errors = 0
+    removals_planned = 0
     lib_stats = LibraryStats()
 
-    if partial_path:
-        # Partial sync logic
-        movie_folder = resolve_movie_folder(source_lib, partial_path)
-        if not movie_folder:
-            log.error(f"Could not resolve movie folder for partial path: {partial_path}")
-            return 1
+    movies = (
+        ((movie_folder, target_lib.movie_path(movie_info), movie_info),)
+        if movie_folder is not None and movie_info is not None else scan_media_library(
+            source_lib, target_lib, delete=delete, dry_run=dry_run, stats=lib_stats, markers=markers
+        )
+    )
+    for src, _, movie in movies:
+        s = process_movie(
+            source_lib,
+            target_lib,
+            src,
+            movie,
+            delete=delete,
+            verbose=verbose,
+            dry_run=dry_run,
+            update_filenames=update_filenames,
+            verify_only=verify_only,
+            skip_verify=skip_verify,
+            markers=markers,
+        )
+        stat_movies += 1
+        stat_items_linked += s.asset_items_linked + s.videos_linked
+        stat_items_removed += s.asset_items_removed + s.items_removed
+        stat_links_verified += s.links_verified
+        stat_links_broken += s.links_broken
+        stat_links_repaired += s.links_repaired
+        stat_conflicts += s.conflicts
+        remove_errors += s.remove_errors
+        removals_planned += s.removals_planned
 
-        movie_info = source_lib.parse_movie_path(movie_folder)
-        if not movie_info:
-            log.warning(f"Could not parse movie info from folder: {movie_folder}")
-            # We skip this as we cannot process it without parsed info
-            return 1
-        else:
-            s = process_movie(
-                source_lib,
-                target_lib,
-                movie_folder,
-                movie_info,
-                delete=delete,
-                verbose=verbose,
-                dry_run=dry_run,
-                update_filenames=update_filenames,
-                verify_only=verify_only,
-                skip_verify=skip_verify,
-            )
-            stat_movies += 1
-            stat_items_linked += s.asset_items_linked + s.videos_linked
-            stat_items_removed += s.asset_items_removed + s.items_removed
-            stat_links_verified += s.links_verified
-            stat_links_broken += s.links_broken
-            stat_links_repaired += s.links_repaired
-            stat_conflicts += s.conflicts
-    else:
-        for src, _, movie in scan_media_library(source_lib, target_lib, delete=delete, dry_run=dry_run, stats=lib_stats):
-            s = process_movie(
-                source_lib,
-                target_lib,
-                src,
-                movie,
-                delete=delete,
-                verbose=verbose,
-                dry_run=dry_run,
-                update_filenames=update_filenames,
-                verify_only=verify_only,
-                skip_verify=skip_verify,
-            )
-            stat_movies += 1
-            stat_items_linked += s.asset_items_linked + s.videos_linked
-            stat_items_removed += s.asset_items_removed + s.items_removed
-            stat_links_verified += s.links_verified
-            stat_links_broken += s.links_broken
-            stat_links_repaired += s.links_repaired
-            stat_conflicts += s.conflicts
-
-        stat_items_removed += lib_stats.items_removed
-        stat_conflicts += lib_stats.conflicts
+    stat_items_removed += lib_stats.items_removed
+    stat_conflicts += lib_stats.conflicts
+    remove_errors += lib_stats.remove_errors
+    removals_planned += lib_stats.removals_planned
 
     # Build summary message
     if verify_only:
@@ -1500,10 +1581,14 @@ def sync(
 
     # Conflicts skip whole movies (or, at folder level, the whole library) and
     # used to exit 0, so the same movies silently stayed unsynced every run.
+    if dry_run:
+        log.info("%d deletions planned", removals_planned)
     if stat_conflicts:
         log.error("%d conflict(s) skipped; resolve the duplicates listed above", stat_conflicts)
-        return EXIT_CONFLICTS
-    return 0
+    if remove_errors:
+        log.error("%d removals failed", remove_errors)
+        return EXIT_REMOVE_ERRORS
+    return EXIT_CONFLICTS if stat_conflicts else 0
 
 
 if __name__ == "__main__":
@@ -1520,6 +1605,8 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Debug logging")
     parser.add_argument("--convert-to", choices=["plex", "jellyfin", "auto"], default="auto", help="Convert library structure")
     parser.add_argument("--update-filenames", action="store_true", help="Update filenames if source changes")
+    parser.add_argument("--marker-source-root")
+    parser.add_argument("--marker-target-root")
     parser.add_argument("--partial", help="Sync only a specific movie folder (partial path)")
     parser.add_argument("--verify-only", action="store_true", help="Only verify existing links, don't sync")
     parser.add_argument("--skip-verify", action="store_true", help="Skip inode verification for existing files")
@@ -1543,4 +1630,6 @@ if __name__ == "__main__":
         skip_verify=args.skip_verify,
         mergerfs_branches=args.mergerfs_branches,
         check_colocation=args.check_colocation,
+        marker_source_root=args.marker_source_root,
+        marker_target_root=args.marker_target_root,
     ))

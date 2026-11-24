@@ -22,6 +22,7 @@ def remove(item: pathlib.Path) -> bool:
         elif item.is_dir():
             shutil.rmtree(item)
         else:
+            item.lstat()  # Route a concurrently removed path through the ENOENT handler.
             log.warning("Will not remove '%s' (unknown type)", item)
             return False
         return True

@@ -22,7 +22,7 @@ IGNORED_FOLDER_NAMES = {"_trash", "lost+found"}
 
 
 def is_ignored_folder(name: str) -> bool:
-    return name in IGNORED_FOLDER_NAMES or name.startswith(".Trash")
+    return name in IGNORED_FOLDER_NAMES or name.startswith(".")
 
 
 @dataclass
